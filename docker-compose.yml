@@ -11,7 +11,6 @@ services:
       # - BINANCE_API_KEY=your_api_key_here
       # - BINANCE_API_SECRET=your_api_secret_here
     volumes:
-      - ./config:/app/config        # Configuration (API keys, params)
       - ./data:/app/data            # SQLite DB persistence
       - ./logs:/app/logs            # Log file persistence
     logging:

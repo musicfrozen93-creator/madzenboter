@@ -5,15 +5,20 @@ services:
     build: .
     container_name: zentry-futures-core
     restart: unless-stopped
+
     environment:
       - TZ=UTC
-      # Optionally override API keys via env vars instead of config.json
-      # - BINANCE_API_KEY=your_api_key_here
-      # - BINANCE_API_SECRET=your_api_secret_here
+
     volumes:
-      - ./data:/app/data            # SQLite DB persistence
+      - data:/app/data
+      - logs:/app/logs
+
     logging:
       driver: json-file
       options:
         max-size: "10m"
         max-file: "3"
+
+volumes:
+  data:
+  logs:

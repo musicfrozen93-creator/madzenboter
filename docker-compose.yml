@@ -12,7 +12,6 @@ services:
       # - BINANCE_API_SECRET=your_api_secret_here
     volumes:
       - ./data:/app/data            # SQLite DB persistence
-      - ./logs:/app/logs            # Log file persistence
     logging:
       driver: json-file
       options:

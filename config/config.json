@@ -19,7 +19,7 @@
     "high_vol_atr_multiplier": 1.5,
     "low_vol_atr_multiplier": 0.7,
 
-    "max_watchlist_size": 20,
+    "max_watchlist_size": 5,
     "min_volume_24h": 50000000,
     "max_funding_rate": 0.001,
     "min_coin_age_days": 30,
@@ -49,11 +49,11 @@
         "high": 5
     },
 
-    "position_margin_tiers": [
-        {"max_balance": 50, "margin_range": [0.0, 1.20], "max_positions": 5},
-        {"max_balance": 100, "margin_range": [0.60, 0.80], "max_positions": 5},
-        {"max_balance": 999999999, "margin_range": [0.90, 1.50], "max_positions": 8}
-    ],
+  "position_margin_tiers": [
+  {"max_balance": 50, "margin_range": [2.0, 4.0], "max_positions": 2},
+  {"max_balance": 100, "margin_range": [3.0, 5.0], "max_positions": 3},
+  {"max_balance": 999999999, "margin_range": [5.0, 8.0], "max_positions": 5}
+]
 
     "slippage_pct": 0.0005,
     "taker_fee_pct": 0.0004,

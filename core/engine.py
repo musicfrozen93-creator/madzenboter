@@ -46,7 +46,7 @@ class AccountFilter(logging.Filter):
 
     def filter(self, record: logging.LogRecord) -> bool:
         if not hasattr(record, 'account_id'):
-            record.account_id = 'master'
+            record.account_id = 'SYSTEM'
         return True
 
 
@@ -210,6 +210,7 @@ class TradingEngine:
         # Console handler
         console = logging.StreamHandler(sys.stdout)
         console.setLevel(logging.INFO)
+        console.addFilter(account_filter)
         console.setFormatter(logging.Formatter(log_format, date_format))
         root_logger.addHandler(console)
 
@@ -219,6 +220,7 @@ class TradingEngine:
             encoding='utf-8',
         )
         bot_handler.setLevel(logging.INFO)
+        bot_handler.addFilter(account_filter)
         bot_handler.setFormatter(logging.Formatter(log_format, date_format))
         root_logger.addHandler(bot_handler)
 
@@ -228,6 +230,7 @@ class TradingEngine:
             encoding='utf-8',
         )
         error_handler.setLevel(logging.ERROR)
+        error_handler.addFilter(account_filter)
         error_handler.setFormatter(logging.Formatter(log_format, date_format))
         root_logger.addHandler(error_handler)
 
@@ -238,6 +241,7 @@ class TradingEngine:
             encoding='utf-8',
         )
         trade_handler.setLevel(logging.INFO)
+        trade_handler.addFilter(account_filter)
         trade_handler.setFormatter(logging.Formatter(log_format, date_format))
         trade_logger.addHandler(trade_handler)
 
@@ -248,6 +252,7 @@ class TradingEngine:
             encoding='utf-8',
         )
         exec_handler.setLevel(logging.INFO)
+        exec_handler.addFilter(account_filter)
         exec_handler.setFormatter(logging.Formatter(log_format, date_format))
         exec_logger.addHandler(exec_handler)
 
@@ -258,6 +263,7 @@ class TradingEngine:
             encoding='utf-8',
         )
         acct_handler.setLevel(logging.INFO)
+        acct_handler.addFilter(account_filter)
         acct_handler.setFormatter(logging.Formatter(log_format, date_format))
         acct_logger.addHandler(acct_handler)
 

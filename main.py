@@ -1,14 +1,10 @@
 """
 Zentry Futures Core — Entry Point.
 
-CLI interface for live trading, backtesting, and maintenance commands.
+CLI interface for live trading and maintenance commands.
 
 Usage:
     python main.py --mode live          # Live trading (testnet by default)
-    python main.py --mode backtest \\
-        --symbols BTC/USDT:USDT ETH/USDT:USDT \\
-        --start 2026-01-01 --end 2026-03-01 \\
-        --balance 100
     python main.py --clear-shutdown     # Clear emergency shutdown flag
 """
 
@@ -16,9 +12,6 @@ import argparse
 import logging
 import sys
 
-from backtest.data_loader import DataLoader
-from backtest.engine import BacktestEngine
-from backtest.reporter import BacktestReporter
 from config.settings import Settings
 from core.database import Database
 from core.engine import TradingEngine
@@ -45,28 +38,12 @@ Examples:
     )
 
     parser.add_argument(
-        '--mode', choices=['live', 'backtest'], default='live',
-        help='Run mode: live trading or backtesting (default: live)',
+        '--mode', choices=['live'], default='live',
+        help='Run mode: live trading (default: live)',
     )
     parser.add_argument(
         '--config', default='config/config.json',
         help='Path to configuration file (default: config/config.json)',
-    )
-    parser.add_argument(
-        '--symbols', nargs='+',
-        help='Symbols for backtesting (e.g., BTC/USDT:USDT ETH/USDT:USDT)',
-    )
-    parser.add_argument(
-        '--start',
-        help='Backtest start date (YYYY-MM-DD)',
-    )
-    parser.add_argument(
-        '--end',
-        help='Backtest end date (YYYY-MM-DD)',
-    )
-    parser.add_argument(
-        '--balance', type=float, default=100.0,
-        help='Initial balance for backtesting (default: 100.0)',
     )
     parser.add_argument(
         '--clear-shutdown', action='store_true',
@@ -118,54 +95,6 @@ Examples:
         if args.api:
             engine.start_api_server()
         engine.start()
-
-    # ── Backtesting ──
-    elif args.mode == 'backtest':
-        if not args.symbols:
-            print('Error: --symbols is required for backtesting')
-            print('Example: --symbols BTC/USDT:USDT ETH/USDT:USDT')
-            sys.exit(1)
-        if not args.start or not args.end:
-            print('Error: --start and --end are required for backtesting')
-            print('Example: --start 2026-01-01 --end 2026-03-01')
-            sys.exit(1)
-
-        # Setup basic logging for backtest
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s | %(name)s | %(levelname)s | %(message)s',
-            datefmt='%Y-%m-%d %H:%M:%S',
-        )
-
-        print()
-        print('═' * 50)
-        print('  ZENTRY FUTURES CORE — BACKTEST')
-        print(f'  Symbols: {", ".join(args.symbols)}')
-        print(f'  Period:  {args.start} → {args.end}')
-        print(f'  Balance: ${args.balance:.2f}')
-        print('═' * 50)
-        print()
-
-        data_loader = DataLoader()
-        bt_engine = BacktestEngine(settings, initial_balance=args.balance)
-
-        try:
-            metrics = bt_engine.run(args.symbols, args.start, args.end, data_loader)
-        except KeyboardInterrupt:
-            print('\nBacktest interrupted.')
-            sys.exit(0)
-        finally:
-            data_loader.close()
-
-        if metrics:
-            reporter = BacktestReporter()
-            reporter.print_report(metrics)
-
-            report_file = f'data/backtest_{args.start}_{args.end}.json'
-            reporter.save_report(metrics, report_file)
-            print(f'Report saved to: {report_file}')
-        else:
-            print('No metrics generated — check if data was loaded.')
 
 
 if __name__ == '__main__':

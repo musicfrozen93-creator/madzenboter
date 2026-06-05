@@ -28,15 +28,33 @@ class ExchangeClient:
     automatic retries on transient errors, and precision validation.
     """
 
-    def __init__(self, settings: Settings) -> None:
+    def __init__(self, settings: Settings, api_key: str = '', api_secret: str = '') -> None:
         """Initialise the exchange client.
 
         Args:
             settings: Application settings containing API credentials.
+            api_key: Optional per-account API key (overrides settings).
+            api_secret: Optional per-account API secret (overrides settings).
         """
         self.settings = settings
+        self._api_key = api_key
+        self._api_secret = api_secret
         self.exchange: Optional[ccxt.binance] = None
         self.markets: dict = {}
+
+    @classmethod
+    def for_account(cls, settings: Settings, api_key: str, api_secret: str) -> 'ExchangeClient':
+        """Create an ExchangeClient bound to specific API credentials.
+
+        Args:
+            settings: Application settings (used for non-credential config).
+            api_key: Account-specific API key.
+            api_secret: Account-specific API secret.
+
+        Returns:
+            A new ExchangeClient configured with the given credentials.
+        """
+        return cls(settings, api_key=api_key, api_secret=api_secret)
 
     # ───────────────────────────────────────────
     # Initialisation
@@ -49,8 +67,8 @@ class ExchangeClient:
         Loads all market information for symbol lookups.
         """
         self.exchange = ccxt.binance({
-            'apiKey': self.settings.api_key,
-            'secret': self.settings.api_secret,
+            'apiKey': self._api_key or self.settings.api_key,
+            'secret': self._api_secret or self.settings.api_secret,
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'future',

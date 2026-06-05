@@ -10,7 +10,7 @@ import logging
 from typing import Optional
 
 from config.settings import Settings
-from core.models import Basket, RecoveryLayer
+from core.dto import Basket, RecoveryLayer
 
 logger = logging.getLogger(__name__)
 

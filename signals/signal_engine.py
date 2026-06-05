@@ -12,7 +12,7 @@ from typing import Optional, Tuple
 import pandas as pd
 
 from config.settings import MarketRegime, Settings, VolatilityLevel
-from core.models import Signal
+from core.dto import Signal
 from exchange.client import ExchangeClient
 from signals.indicators import compute_adx, compute_atr, compute_ema, compute_rsi
 

@@ -72,6 +72,10 @@ Examples:
         '--clear-shutdown', action='store_true',
         help='Clear emergency shutdown flag and exit',
     )
+    parser.add_argument(
+        '--api', action='store_true',
+        help='Start the Admin REST API server in a background thread',
+    )
 
     args = parser.parse_args()
 
@@ -88,7 +92,7 @@ Examples:
 
     # ── Clear emergency shutdown ──
     if args.clear_shutdown:
-        db = Database('data/zentry.db')
+        db = Database(settings.database_url)
         db.initialize()
         db.set_state('emergency_shutdown', 'false')
         db.set_state('emergency_shutdown_reason', '')
@@ -111,6 +115,8 @@ Examples:
             print()
 
         engine = TradingEngine(settings)
+        if args.api:
+            engine.start_api_server()
         engine.start()
 
     # ── Backtesting ──

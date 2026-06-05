@@ -12,7 +12,7 @@ from typing import List, Optional
 
 from config.settings import Settings, VolatilityLevel
 from core.database import Database
-from core.models import Basket, RecoveryLayer, Signal, TradeRecord
+from core.dto import Basket, RecoveryLayer, Signal, TradeRecord
 from exchange.client import ExchangeClient
 from exchange.utils import round_quantity, validate_min_notional
 from grid.recovery import RecoverySystem

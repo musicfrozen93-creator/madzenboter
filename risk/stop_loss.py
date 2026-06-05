@@ -10,7 +10,7 @@ Implements three levels of stop-loss protection:
 import logging
 
 from config.settings import Settings
-from core.models import Basket, RecoveryLayer
+from core.dto import Basket, RecoveryLayer
 
 logger = logging.getLogger(__name__)
 

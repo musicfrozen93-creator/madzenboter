@@ -1,42 +1,102 @@
 """
-Zentry Futures Core — SQLite Database Repository.
+ZenGrid — PostgreSQL Database Repository (SQLAlchemy).
 
-Provides typed persistence for baskets, trades, watchlist, bot state,
-and daily statistics. Uses WAL mode for concurrent read/write performance.
+Replaces the original SQLite database with PostgreSQL via SQLAlchemy ORM.
+Preserves the exact same public API so all existing callers (TradingEngine,
+RiskManager, CoinScanner, PositionManager) continue to work unchanged.
+
+New methods are added for multi-account operations.
 """
 
-import json
 import logging
 import os
-import sqlite3
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Generator, List, Optional
 
-from core.models import Basket, CoinScore, RecoveryLayer, TradeRecord
+from sqlalchemy import create_engine, text
+from sqlalchemy.orm import Session, sessionmaker
+
+from core.dto import Basket, CoinScore, RecoveryLayer, TradeRecord
+from core.models import (
+    AccountModel,
+    Base,
+    BasketModel,
+    BotStateModel,
+    DailyStatModel,
+    ExecutionLogModel,
+    PositionModel,
+    RecoveryLayerModel,
+    RiskMetricModel,
+    SignalModel,
+    SubscriptionModel,
+    TradeModel,
+    UserModel,
+    WatchlistModel,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class Database:
-    """SQLite repository for all bot persistence needs.
+    """PostgreSQL repository for all bot persistence needs.
 
-    Thread-safe with check_same_thread=False.
-    Uses WAL journal mode for better concurrency.
+    Maintains backward-compatible API with the original SQLite Database class.
+    All existing callers continue to work without modification.
     """
 
-    def __init__(self, db_path: str = 'data/zentry.db') -> None:
+    def __init__(self, db_url: Optional[str] = None) -> None:
         """Initialise database connection.
 
         Args:
-            db_path: Path to the SQLite database file.
+            db_url: PostgreSQL connection URL. Falls back to DATABASE_URL
+                    env var, then to a local default.
         """
-        self.db_path = db_path
-        os.makedirs(os.path.dirname(db_path) or '.', exist_ok=True)
-        self.conn = sqlite3.connect(db_path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute('PRAGMA journal_mode=WAL')
-        self.conn.execute('PRAGMA foreign_keys=ON')
+        self.db_url = (
+            db_url
+            or os.environ.get('DATABASE_URL')
+            or 'postgresql://zengrid:zengrid@localhost:5432/zengrid'
+        )
+
+        self.engine = create_engine(
+            self.db_url,
+            pool_size=20,
+            max_overflow=30,
+            pool_pre_ping=True,
+            pool_recycle=3600,
+            echo=False,
+        )
+        self.SessionLocal = sessionmaker(bind=self.engine, expire_on_commit=False)
+
+    # ───────────────────────────────────────────
+    # Session Management
+    # ───────────────────────────────────────────
+
+    @contextmanager
+    def session(self) -> Generator[Session, None, None]:
+        """Provide a transactional session scope.
+
+        Yields:
+            SQLAlchemy Session that auto-commits on success, rolls back on error.
+        """
+        session = self.SessionLocal()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
+
+    def get_session(self) -> Session:
+        """Get a new session (caller is responsible for commit/close).
+
+        Returns:
+            New SQLAlchemy Session.
+        """
+        return self.SessionLocal()
 
     # ───────────────────────────────────────────
     # Schema Initialisation
@@ -44,200 +104,122 @@ class Database:
 
     def initialize(self) -> None:
         """Create all tables if they do not exist."""
-        cursor = self.conn.cursor()
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS baskets (
-                id TEXT PRIMARY KEY,
-                symbol TEXT NOT NULL,
-                side TEXT NOT NULL,
-                atr_at_entry REAL NOT NULL,
-                volatility TEXT NOT NULL,
-                leverage INTEGER NOT NULL DEFAULT 10,
-                status TEXT NOT NULL DEFAULT 'active',
-                created_at REAL NOT NULL
-            )
-        ''')
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS recovery_layers (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                basket_id TEXT NOT NULL,
-                layer_number INTEGER NOT NULL,
-                entry_price REAL NOT NULL,
-                margin REAL NOT NULL,
-                quantity REAL NOT NULL,
-                side TEXT NOT NULL,
-                timestamp REAL NOT NULL,
-                status TEXT NOT NULL DEFAULT 'active',
-                FOREIGN KEY (basket_id) REFERENCES baskets(id)
-            )
-        ''')
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS trades (
-                id TEXT PRIMARY KEY,
-                basket_id TEXT NOT NULL,
-                symbol TEXT NOT NULL,
-                side TEXT NOT NULL,
-                entry_price REAL NOT NULL,
-                exit_price REAL NOT NULL,
-                quantity REAL NOT NULL,
-                margin REAL NOT NULL,
-                leverage INTEGER NOT NULL,
-                pnl REAL NOT NULL,
-                fee REAL NOT NULL,
-                layers_used INTEGER NOT NULL,
-                entry_time REAL NOT NULL,
-                exit_time REAL NOT NULL,
-                exit_reason TEXT NOT NULL
-            )
-        ''')
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS watchlist (
-                symbol TEXT PRIMARY KEY,
-                volume_24h REAL,
-                atr REAL,
-                atr_score REAL,
-                volume_score REAL,
-                spread_score REAL,
-                funding_rate REAL,
-                funding_score REAL,
-                composite_score REAL,
-                updated_at REAL
-            )
-        ''')
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS bot_state (
-                key TEXT PRIMARY KEY,
-                value TEXT,
-                updated_at REAL
-            )
-        ''')
-
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS daily_stats (
-                date TEXT PRIMARY KEY,
-                starting_balance REAL,
-                ending_balance REAL,
-                realized_pnl REAL DEFAULT 0,
-                total_trades INTEGER DEFAULT 0,
-                winning_trades INTEGER DEFAULT 0,
-                losing_trades INTEGER DEFAULT 0,
-                max_drawdown REAL DEFAULT 0,
-                created_at REAL
-            )
-        ''')
-
-        # Indexes
-        cursor.execute(
-            'CREATE INDEX IF NOT EXISTS idx_layers_basket ON recovery_layers(basket_id)'
-        )
-        cursor.execute(
-            'CREATE INDEX IF NOT EXISTS idx_trades_symbol ON trades(symbol)'
-        )
-        cursor.execute(
-            'CREATE INDEX IF NOT EXISTS idx_trades_exit_time ON trades(exit_time)'
-        )
-        cursor.execute(
-            'CREATE INDEX IF NOT EXISTS idx_baskets_status ON baskets(status)'
-        )
-
-        self.conn.commit()
-        logger.info('Database initialised at %s', self.db_path)
+        Base.metadata.create_all(bind=self.engine)
+        logger.info('Database initialised at %s', self.db_url.split('@')[-1])
 
     # ───────────────────────────────────────────
-    # Basket Operations
+    # Basket Operations (backward-compatible)
     # ───────────────────────────────────────────
 
     def save_basket(self, basket: Basket) -> None:
         """Insert a new basket and all its layers.
 
         Args:
-            basket: The Basket to persist.
+            basket: The Basket DTO to persist.
         """
-        cursor = self.conn.cursor()
-        cursor.execute(
-            '''INSERT OR REPLACE INTO baskets
-               (id, symbol, side, atr_at_entry, volatility, leverage, status, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-            (basket.id, basket.symbol, basket.side, basket.atr_at_entry,
-             basket.volatility, basket.leverage, basket.status, basket.created_at)
-        )
-        for layer in basket.layers:
-            cursor.execute(
-                '''INSERT INTO recovery_layers
-                   (basket_id, layer_number, entry_price, margin, quantity, side, timestamp, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                (basket.id, layer.layer_number, layer.entry_price, layer.margin,
-                 layer.quantity, layer.side, layer.timestamp, layer.status)
+        with self.session() as session:
+            basket_orm = BasketModel(
+                id=basket.id,
+                account_id=getattr(basket, 'account_id', None),
+                symbol=basket.symbol,
+                side=basket.side,
+                atr_at_entry=basket.atr_at_entry,
+                volatility=basket.volatility,
+                leverage=basket.leverage,
+                status=basket.status,
+                created_at=basket.created_at,
             )
-        self.conn.commit()
+            session.merge(basket_orm)
+            for layer in basket.layers:
+                layer_orm = RecoveryLayerModel(
+                    basket_id=basket.id,
+                    layer_number=layer.layer_number,
+                    entry_price=layer.entry_price,
+                    margin=layer.margin,
+                    quantity=layer.quantity,
+                    side=layer.side,
+                    timestamp=layer.timestamp,
+                    status=layer.status,
+                )
+                session.add(layer_orm)
 
     def update_basket(self, basket: Basket) -> None:
         """Update an existing basket and upsert its layers.
 
         Args:
-            basket: The Basket with updated state.
+            basket: The Basket DTO with updated state.
         """
-        cursor = self.conn.cursor()
-        cursor.execute(
-            '''UPDATE baskets SET status=?, leverage=? WHERE id=?''',
-            (basket.status, basket.leverage, basket.id)
-        )
-        # Delete existing layers and re-insert
-        cursor.execute('DELETE FROM recovery_layers WHERE basket_id=?', (basket.id,))
-        for layer in basket.layers:
-            cursor.execute(
-                '''INSERT INTO recovery_layers
-                   (basket_id, layer_number, entry_price, margin, quantity, side, timestamp, status)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)''',
-                (basket.id, layer.layer_number, layer.entry_price, layer.margin,
-                 layer.quantity, layer.side, layer.timestamp, layer.status)
-            )
-        self.conn.commit()
+        with self.session() as session:
+            basket_orm = session.get(BasketModel, basket.id)
+            if basket_orm:
+                basket_orm.status = basket.status
+                basket_orm.leverage = basket.leverage
 
-    def load_active_baskets(self) -> List[Basket]:
+            # Delete existing layers and re-insert
+            session.query(RecoveryLayerModel).filter(
+                RecoveryLayerModel.basket_id == basket.id
+            ).delete()
+            for layer in basket.layers:
+                layer_orm = RecoveryLayerModel(
+                    basket_id=basket.id,
+                    layer_number=layer.layer_number,
+                    entry_price=layer.entry_price,
+                    margin=layer.margin,
+                    quantity=layer.quantity,
+                    side=layer.side,
+                    timestamp=layer.timestamp,
+                    status=layer.status,
+                )
+                session.add(layer_orm)
+
+    def load_active_baskets(self, account_id: Optional[int] = None) -> List[Basket]:
         """Load all baskets with status == 'active', including their layers.
 
+        Args:
+            account_id: If provided, filter by account. None loads all.
+
         Returns:
-            List of active Basket instances.
+            List of active Basket DTO instances.
         """
-        cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM baskets WHERE status='active'")
-        rows = cursor.fetchall()
-        baskets: List[Basket] = []
-        for row in rows:
-            basket = Basket(
-                symbol=row['symbol'],
-                side=row['side'],
-                atr_at_entry=row['atr_at_entry'],
-                volatility=row['volatility'],
-                id=row['id'],
-                created_at=row['created_at'],
-                status=row['status'],
-                leverage=row['leverage'],
-            )
-            # Load layers
-            cursor.execute(
-                'SELECT * FROM recovery_layers WHERE basket_id=? ORDER BY layer_number',
-                (basket.id,)
-            )
-            for lr in cursor.fetchall():
-                layer = RecoveryLayer(
-                    layer_number=lr['layer_number'],
-                    entry_price=lr['entry_price'],
-                    margin=lr['margin'],
-                    quantity=lr['quantity'],
-                    side=lr['side'],
-                    timestamp=lr['timestamp'],
-                    status=lr['status'],
+        with self.session() as session:
+            query = session.query(BasketModel).filter(BasketModel.status == 'active')
+            if account_id is not None:
+                query = query.filter(BasketModel.account_id == account_id)
+
+            rows = query.all()
+            baskets: List[Basket] = []
+            for row in rows:
+                basket = Basket(
+                    symbol=row.symbol,
+                    side=row.side,
+                    atr_at_entry=row.atr_at_entry,
+                    volatility=row.volatility,
+                    id=row.id,
+                    created_at=row.created_at,
+                    status=row.status,
+                    leverage=row.leverage,
+                    account_id=row.account_id,
                 )
-                basket.layers.append(layer)
-            baskets.append(basket)
-        return baskets
+                # Load layers
+                layers = (
+                    session.query(RecoveryLayerModel)
+                    .filter(RecoveryLayerModel.basket_id == row.id)
+                    .order_by(RecoveryLayerModel.layer_number)
+                    .all()
+                )
+                for lr in layers:
+                    layer = RecoveryLayer(
+                        layer_number=lr.layer_number,
+                        entry_price=lr.entry_price,
+                        margin=lr.margin,
+                        quantity=lr.quantity,
+                        side=lr.side,
+                        timestamp=lr.timestamp,
+                        status=lr.status,
+                    )
+                    basket.layers.append(layer)
+                baskets.append(basket)
+            return baskets
 
     def close_basket(self, basket_id: str) -> None:
         """Mark a basket and all its layers as closed.
@@ -245,113 +227,139 @@ class Database:
         Args:
             basket_id: The basket UUID to close.
         """
-        cursor = self.conn.cursor()
-        cursor.execute(
-            "UPDATE baskets SET status='closed' WHERE id=?", (basket_id,)
-        )
-        cursor.execute(
-            "UPDATE recovery_layers SET status='closed' WHERE basket_id=?", (basket_id,)
-        )
-        self.conn.commit()
+        with self.session() as session:
+            session.query(BasketModel).filter(BasketModel.id == basket_id).update(
+                {'status': 'closed'}
+            )
+            session.query(RecoveryLayerModel).filter(
+                RecoveryLayerModel.basket_id == basket_id
+            ).update({'status': 'closed'})
 
     # ───────────────────────────────────────────
-    # Trade Operations
+    # Trade Operations (backward-compatible)
     # ───────────────────────────────────────────
 
     def save_trade(self, trade: TradeRecord) -> None:
         """Insert an immutable trade record.
 
         Args:
-            trade: The TradeRecord to persist.
+            trade: The TradeRecord DTO to persist.
         """
-        cursor = self.conn.cursor()
-        cursor.execute(
-            '''INSERT INTO trades
-               (id, basket_id, symbol, side, entry_price, exit_price, quantity,
-                margin, leverage, pnl, fee, layers_used, entry_time, exit_time, exit_reason)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (trade.id, trade.basket_id, trade.symbol, trade.side,
-             trade.entry_price, trade.exit_price, trade.quantity,
-             trade.margin, trade.leverage, trade.pnl, trade.fee,
-             trade.layers_used, trade.entry_time, trade.exit_time, trade.exit_reason)
-        )
-        self.conn.commit()
+        with self.session() as session:
+            trade_orm = TradeModel(
+                id=trade.id,
+                account_id=getattr(trade, 'account_id', None),
+                basket_id=trade.basket_id,
+                symbol=trade.symbol,
+                side=trade.side,
+                entry_price=trade.entry_price,
+                exit_price=trade.exit_price,
+                quantity=trade.quantity,
+                margin=trade.margin,
+                leverage=trade.leverage,
+                pnl=trade.pnl,
+                fee=trade.fee,
+                layers_used=trade.layers_used,
+                entry_time=trade.entry_time,
+                exit_time=trade.exit_time,
+                exit_reason=trade.exit_reason,
+            )
+            session.merge(trade_orm)
 
-    def get_trades_since(self, timestamp: float) -> List[TradeRecord]:
+    def get_trades_since(
+        self, timestamp: float, account_id: Optional[int] = None
+    ) -> List[TradeRecord]:
         """Fetch all trades with exit_time >= timestamp.
 
         Args:
             timestamp: Unix timestamp to filter from.
+            account_id: If provided, filter by account.
 
         Returns:
-            List of TradeRecord instances.
+            List of TradeRecord DTO instances.
         """
-        cursor = self.conn.cursor()
-        cursor.execute(
-            'SELECT * FROM trades WHERE exit_time >= ? ORDER BY exit_time', (timestamp,)
-        )
-        return [self._row_to_trade(r) for r in cursor.fetchall()]
+        with self.session() as session:
+            query = (
+                session.query(TradeModel)
+                .filter(TradeModel.exit_time >= timestamp)
+                .order_by(TradeModel.exit_time)
+            )
+            if account_id is not None:
+                query = query.filter(TradeModel.account_id == account_id)
 
-    def get_today_trades(self) -> List[TradeRecord]:
+            return [self._trade_orm_to_dto(r) for r in query.all()]
+
+    def get_today_trades(self, account_id: Optional[int] = None) -> List[TradeRecord]:
         """Fetch all trades from the current UTC day.
 
+        Args:
+            account_id: If provided, filter by account.
+
         Returns:
-            List of today's TradeRecord instances.
+            List of today's TradeRecord DTO instances.
         """
         today_start = datetime.now(timezone.utc).replace(
             hour=0, minute=0, second=0, microsecond=0
         ).timestamp()
-        return self.get_trades_since(today_start)
+        return self.get_trades_since(today_start, account_id=account_id)
 
     # ───────────────────────────────────────────
-    # Watchlist Operations
+    # Watchlist Operations (backward-compatible)
     # ───────────────────────────────────────────
 
     def save_watchlist(self, scores: List[CoinScore]) -> None:
         """Replace the entire watchlist with new scores.
 
         Args:
-            scores: List of CoinScore entries.
+            scores: List of CoinScore DTO entries.
         """
-        cursor = self.conn.cursor()
-        cursor.execute('DELETE FROM watchlist')
-        now = time.time()
-        for s in scores:
-            cursor.execute(
-                '''INSERT INTO watchlist
-                   (symbol, volume_24h, atr, atr_score, volume_score,
-                    spread_score, funding_rate, funding_score, composite_score, updated_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-                (s.symbol, s.volume_24h, s.atr, s.atr_score, s.volume_score,
-                 s.spread_score, s.funding_rate, s.funding_score, s.composite_score, now)
-            )
-        self.conn.commit()
+        with self.session() as session:
+            session.query(WatchlistModel).delete()
+            now = time.time()
+            for s in scores:
+                wl = WatchlistModel(
+                    symbol=s.symbol,
+                    volume_24h=s.volume_24h,
+                    atr=s.atr,
+                    atr_score=s.atr_score,
+                    volume_score=s.volume_score,
+                    spread_score=s.spread_score,
+                    funding_rate=s.funding_rate,
+                    funding_score=s.funding_score,
+                    composite_score=s.composite_score,
+                    updated_at=now,
+                )
+                session.add(wl)
 
     def get_watchlist(self) -> List[CoinScore]:
         """Load the current watchlist ordered by composite score.
 
         Returns:
-            List of CoinScore entries, highest score first.
+            List of CoinScore DTO entries, highest score first.
         """
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT * FROM watchlist ORDER BY composite_score DESC')
-        return [
-            CoinScore(
-                symbol=r['symbol'],
-                volume_24h=r['volume_24h'],
-                atr=r['atr'],
-                atr_score=r['atr_score'],
-                volume_score=r['volume_score'],
-                spread_score=r['spread_score'],
-                funding_rate=r['funding_rate'],
-                funding_score=r['funding_score'],
-                composite_score=r['composite_score'],
+        with self.session() as session:
+            rows = (
+                session.query(WatchlistModel)
+                .order_by(WatchlistModel.composite_score.desc())
+                .all()
             )
-            for r in cursor.fetchall()
-        ]
+            return [
+                CoinScore(
+                    symbol=r.symbol,
+                    volume_24h=r.volume_24h or 0.0,
+                    atr=r.atr or 0.0,
+                    atr_score=r.atr_score or 0.0,
+                    volume_score=r.volume_score or 0.0,
+                    spread_score=r.spread_score or 0.0,
+                    funding_rate=r.funding_rate or 0.0,
+                    funding_score=r.funding_score or 0.0,
+                    composite_score=r.composite_score or 0.0,
+                )
+                for r in rows
+            ]
 
     # ───────────────────────────────────────────
-    # Bot State (Key-Value Store)
+    # Bot State (backward-compatible KV store)
     # ───────────────────────────────────────────
 
     def set_state(self, key: str, value: str) -> None:
@@ -361,13 +369,15 @@ class Database:
             key: State key.
             value: State value (always stored as string).
         """
-        cursor = self.conn.cursor()
-        cursor.execute(
-            '''INSERT OR REPLACE INTO bot_state (key, value, updated_at)
-               VALUES (?, ?, ?)''',
-            (key, value, time.time())
-        )
-        self.conn.commit()
+        with self.session() as session:
+            state = session.get(BotStateModel, key)
+            if state:
+                state.value = value
+                state.updated_at = time.time()
+            else:
+                session.add(BotStateModel(
+                    key=key, value=value, updated_at=time.time()
+                ))
 
     def get_state(self, key: str) -> Optional[str]:
         """Retrieve a value from bot_state.
@@ -378,70 +388,292 @@ class Database:
         Returns:
             The value string, or None if key does not exist.
         """
-        cursor = self.conn.cursor()
-        cursor.execute('SELECT value FROM bot_state WHERE key=?', (key,))
-        row = cursor.fetchone()
-        return row['value'] if row else None
+        with self.session() as session:
+            state = session.get(BotStateModel, key)
+            return state.value if state else None
 
     # ───────────────────────────────────────────
-    # Daily Statistics
+    # Daily Statistics (backward-compatible, now per-account)
     # ───────────────────────────────────────────
 
-    def save_daily_stats(self, stats: dict) -> None:
+    def save_daily_stats(self, stats: dict, account_id: Optional[int] = None) -> None:
         """Insert or replace daily statistics.
 
         Args:
             stats: Dict with keys: date, starting_balance, ending_balance,
                    realized_pnl, total_trades, winning_trades, losing_trades,
                    max_drawdown.
+            account_id: If provided, associate stats with an account.
         """
-        cursor = self.conn.cursor()
-        cursor.execute(
-            '''INSERT OR REPLACE INTO daily_stats
-               (date, starting_balance, ending_balance, realized_pnl,
-                total_trades, winning_trades, losing_trades, max_drawdown, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
-            (stats.get('date'), stats.get('starting_balance', 0),
-             stats.get('ending_balance', 0), stats.get('realized_pnl', 0),
-             stats.get('total_trades', 0), stats.get('winning_trades', 0),
-             stats.get('losing_trades', 0), stats.get('max_drawdown', 0),
-             time.time())
-        )
-        self.conn.commit()
+        with self.session() as session:
+            date_str = stats.get('date', '')
+            # Check if exists
+            existing = (
+                session.query(DailyStatModel)
+                .filter(
+                    DailyStatModel.account_id == account_id,
+                    DailyStatModel.date == date_str,
+                )
+                .first()
+            )
+            if existing:
+                existing.starting_balance = stats.get('starting_balance', 0)
+                existing.ending_balance = stats.get('ending_balance', 0)
+                existing.realized_pnl = stats.get('realized_pnl', 0)
+                existing.total_trades = stats.get('total_trades', 0)
+                existing.winning_trades = stats.get('winning_trades', 0)
+                existing.losing_trades = stats.get('losing_trades', 0)
+                existing.max_drawdown = stats.get('max_drawdown', 0)
+                existing.created_at = time.time()
+            else:
+                session.add(DailyStatModel(
+                    account_id=account_id,
+                    date=date_str,
+                    starting_balance=stats.get('starting_balance', 0),
+                    ending_balance=stats.get('ending_balance', 0),
+                    realized_pnl=stats.get('realized_pnl', 0),
+                    total_trades=stats.get('total_trades', 0),
+                    winning_trades=stats.get('winning_trades', 0),
+                    losing_trades=stats.get('losing_trades', 0),
+                    max_drawdown=stats.get('max_drawdown', 0),
+                    created_at=time.time(),
+                ))
 
     # ───────────────────────────────────────────
-    # Helpers
+    # Signal Operations (NEW)
     # ───────────────────────────────────────────
 
-    def _row_to_trade(self, row: sqlite3.Row) -> TradeRecord:
-        """Convert a database row to a TradeRecord.
+    def save_signal(self, signal) -> int:
+        """Persist a signal for audit trail.
 
         Args:
-            row: sqlite3.Row from trades table.
+            signal: Signal DTO from signal_engine.
 
         Returns:
-            TradeRecord instance.
+            The auto-generated signal ID.
+        """
+        with self.session() as session:
+            sig = SignalModel(
+                symbol=signal.symbol,
+                side=signal.side,
+                strength=signal.strength,
+                atr=signal.atr,
+                market_regime=signal.market_regime,
+                volatility=signal.volatility,
+                current_price=signal.current_price,
+                ema200=signal.ema200,
+                rsi=signal.rsi,
+            )
+            session.add(sig)
+            session.flush()
+            return sig.id
+
+    # ───────────────────────────────────────────
+    # Account Operations (NEW)
+    # ───────────────────────────────────────────
+
+    def get_active_accounts(self) -> List[AccountModel]:
+        """Fetch all active trading accounts.
+
+        Returns:
+            List of AccountModel ORM instances.
+        """
+        with self.session() as session:
+            return (
+                session.query(AccountModel)
+                .filter(AccountModel.is_active.is_(True))
+                .all()
+            )
+
+    def get_account_by_id(self, account_id: int) -> Optional[AccountModel]:
+        """Fetch a single account by ID.
+
+        Args:
+            account_id: Account primary key.
+
+        Returns:
+            AccountModel or None.
+        """
+        with self.session() as session:
+            return session.get(AccountModel, account_id)
+
+    def get_all_accounts(self) -> List[AccountModel]:
+        """Fetch all trading accounts (active and inactive).
+
+        Returns:
+            List of AccountModel ORM instances.
+        """
+        with self.session() as session:
+            return session.query(AccountModel).order_by(AccountModel.id).all()
+
+    # ───────────────────────────────────────────
+    # Execution Log Operations (NEW)
+    # ───────────────────────────────────────────
+
+    def save_execution_log(
+        self,
+        account_id: int,
+        action: str,
+        symbol: str,
+        status: str,
+        signal_id: Optional[int] = None,
+        side: Optional[str] = None,
+        quantity: Optional[float] = None,
+        price: Optional[float] = None,
+        error_message: Optional[str] = None,
+    ) -> None:
+        """Record an execution log entry.
+
+        Args:
+            account_id: Account that executed.
+            action: Action type ('open', 'close', 'recovery', 'sync').
+            symbol: Trading pair.
+            status: Result status ('success', 'failed', 'skipped').
+            signal_id: Associated signal ID if applicable.
+            side: Trade side.
+            quantity: Executed quantity.
+            price: Execution price.
+            error_message: Error details if failed.
+        """
+        with self.session() as session:
+            session.add(ExecutionLogModel(
+                account_id=account_id,
+                signal_id=signal_id,
+                action=action,
+                symbol=symbol,
+                side=side,
+                quantity=quantity,
+                price=price,
+                status=status,
+                error_message=error_message,
+            ))
+
+    # ───────────────────────────────────────────
+    # Risk Metrics Operations (NEW)
+    # ───────────────────────────────────────────
+
+    def save_risk_metrics(
+        self,
+        account_id: int,
+        daily_loss: float,
+        max_drawdown: float,
+        current_exposure: float,
+        high_water_mark: float,
+        open_positions_count: int,
+        daily_start_balance: float,
+        current_balance: float,
+    ) -> None:
+        """Insert a risk metrics snapshot for an account.
+
+        Args:
+            account_id: Account ID.
+            daily_loss: Current day loss amount.
+            max_drawdown: Drawdown from HWM.
+            current_exposure: Total margin in use.
+            high_water_mark: Peak balance.
+            open_positions_count: Number of open positions.
+            daily_start_balance: Balance at day start.
+            current_balance: Current balance.
+        """
+        with self.session() as session:
+            session.add(RiskMetricModel(
+                account_id=account_id,
+                daily_loss=daily_loss,
+                max_drawdown=max_drawdown,
+                current_exposure=current_exposure,
+                high_water_mark=high_water_mark,
+                open_positions_count=open_positions_count,
+                daily_start_balance=daily_start_balance,
+                current_balance=current_balance,
+            ))
+
+    # ───────────────────────────────────────────
+    # Position Operations (NEW)
+    # ───────────────────────────────────────────
+
+    def get_positions(
+        self,
+        account_id: Optional[int] = None,
+        status: Optional[str] = 'open',
+    ) -> List[PositionModel]:
+        """Fetch positions, optionally filtered by account and status.
+
+        Args:
+            account_id: If provided, filter by account.
+            status: If provided, filter by status ('open', 'closed').
+
+        Returns:
+            List of PositionModel ORM instances.
+        """
+        with self.session() as session:
+            query = session.query(PositionModel)
+            if account_id is not None:
+                query = query.filter(PositionModel.account_id == account_id)
+            if status is not None:
+                query = query.filter(PositionModel.status == status)
+            return query.order_by(PositionModel.opened_at.desc()).all()
+
+    def get_all_trades(
+        self,
+        account_id: Optional[int] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[TradeModel]:
+        """Fetch trade records with pagination.
+
+        Args:
+            account_id: If provided, filter by account.
+            limit: Max records to return.
+            offset: Pagination offset.
+
+        Returns:
+            List of TradeModel ORM instances.
+        """
+        with self.session() as session:
+            query = session.query(TradeModel)
+            if account_id is not None:
+                query = query.filter(TradeModel.account_id == account_id)
+            return (
+                query.order_by(TradeModel.exit_time.desc())
+                .limit(limit)
+                .offset(offset)
+                .all()
+            )
+
+    # ───────────────────────────────────────────
+    # Internal Helpers
+    # ───────────────────────────────────────────
+
+    def _trade_orm_to_dto(self, row: TradeModel) -> TradeRecord:
+        """Convert a TradeModel ORM instance to a TradeRecord DTO.
+
+        Args:
+            row: TradeModel from the database.
+
+        Returns:
+            TradeRecord DTO instance.
         """
         return TradeRecord(
-            id=row['id'],
-            basket_id=row['basket_id'],
-            symbol=row['symbol'],
-            side=row['side'],
-            entry_price=row['entry_price'],
-            exit_price=row['exit_price'],
-            quantity=row['quantity'],
-            margin=row['margin'],
-            leverage=row['leverage'],
-            pnl=row['pnl'],
-            fee=row['fee'],
-            layers_used=row['layers_used'],
-            entry_time=row['entry_time'],
-            exit_time=row['exit_time'],
-            exit_reason=row['exit_reason'],
+            id=row.id,
+            basket_id=row.basket_id,
+            symbol=row.symbol,
+            side=row.side,
+            entry_price=row.entry_price,
+            exit_price=row.exit_price,
+            quantity=row.quantity,
+            margin=row.margin,
+            leverage=row.leverage,
+            pnl=row.pnl,
+            fee=row.fee,
+            layers_used=row.layers_used,
+            entry_time=row.entry_time,
+            exit_time=row.exit_time,
+            exit_reason=row.exit_reason,
+            account_id=row.account_id,
         )
 
     def close(self) -> None:
-        """Close the database connection."""
-        if self.conn:
-            self.conn.close()
-            logger.info('Database connection closed')
+        """Dispose of the engine connection pool."""
+        if self.engine:
+            self.engine.dispose()
+            logger.info('Database connection pool disposed')

@@ -9,7 +9,7 @@ import logging
 from typing import List
 
 from config.settings import Settings, VolatilityLevel
-from core.models import Basket, RecoveryLayer
+from core.dto import Basket, RecoveryLayer
 
 logger = logging.getLogger(__name__)
 

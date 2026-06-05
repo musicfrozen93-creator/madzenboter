@@ -1,17 +1,21 @@
 """
-Zentry Futures Core — Central Settings, Constants, and Enums.
+ZenGrid — Central Settings, Constants, and Enums.
 
 Loads configuration from config.json and provides typed access to all
 trading parameters. All magic numbers are centralized here.
+
+Extended for multi-account support: DATABASE_URL, MASTER_ENCRYPTION_KEY,
+admin API settings, and per-account settings overrides.
 """
 
 import json
 import logging
 import os
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -46,12 +50,25 @@ class Side(str, Enum):
 
 @dataclass
 class Settings:
-    """Central configuration container loaded from config.json."""
+    """Central configuration container loaded from config.json.
 
-    # ── API ──
+    Extended with multi-account platform settings.
+    """
+
+    # ── API (master account, from environment) ──
     api_key: str = ''
     api_secret: str = ''
     use_testnet: bool = True
+
+    # ── Database ──
+    database_url: str = 'postgresql://zengrid:zengrid@localhost:5432/zengrid'
+
+    # ── Encryption ──
+    master_encryption_key: str = ''
+
+    # ── Admin API ──
+    admin_api_key: str = ''
+    admin_api_port: int = 8000
 
     # ── Timing ──
     scan_interval_seconds: int = 600
@@ -153,6 +170,21 @@ class Settings:
         raw['api_key'] = os.environ.get('BINANCE_API_KEY', raw.get('api_key', ''))
         raw['api_secret'] = os.environ.get('BINANCE_API_SECRET', raw.get('api_secret', ''))
 
+        # Database URL from env or config
+        raw['database_url'] = os.environ.get(
+            'DATABASE_URL',
+            raw.get('database_url', 'postgresql://zengrid:zengrid@localhost:5432/zengrid'),
+        )
+
+        # Encryption key from env
+        raw['master_encryption_key'] = os.environ.get('MASTER_ENCRYPTION_KEY', '')
+
+        # Admin API settings from env
+        raw['admin_api_key'] = os.environ.get('ADMIN_API_KEY', raw.get('admin_api_key', ''))
+        raw['admin_api_port'] = int(
+            os.environ.get('ADMIN_API_PORT', raw.get('admin_api_port', 8000))
+        )
+
         # Handle inf serialisation from JSON (stored as large number)
         tiers = raw.get('position_margin_tiers', [])
         for tier in tiers:
@@ -168,6 +200,69 @@ class Settings:
             'Settings loaded from %s (testnet=%s)', config_path, settings.use_testnet
         )
         return settings
+
+    @classmethod
+    def create_account_settings(
+        cls, base_settings: 'Settings', overrides: dict
+    ) -> 'Settings':
+        """Create a per-account Settings instance by merging overrides.
+
+        This allows each account to have custom risk_pct, max_positions,
+        leverage, TP/SL settings while inheriting all other global settings.
+
+        Args:
+            base_settings: The global Settings instance.
+            overrides: Dict of account-specific overrides. Supported keys:
+                - risk_pct: float (overrides daily_loss_limit_pct)
+                - max_positions: int (applied as cap across all tiers)
+                - leverage_override: int (overrides all volatility-based leverage)
+                - tp_settings: dict (merged into basket_tp_roi, individual_tp_atr_mult)
+                - sl_settings: dict (merged into basket_sl_pct, individual_sl_atr_mult, etc.)
+
+        Returns:
+            New Settings instance with account-specific values.
+        """
+        account_settings = deepcopy(base_settings)
+
+        # Risk override
+        risk_pct = overrides.get('risk_pct')
+        if risk_pct is not None:
+            account_settings.daily_loss_limit_pct = risk_pct
+
+        # Max positions override — cap all tiers
+        max_pos = overrides.get('max_positions')
+        if max_pos is not None:
+            for tier in account_settings.position_margin_tiers:
+                tier['max_positions'] = min(tier['max_positions'], max_pos)
+
+        # Leverage override — use fixed leverage for all volatility levels
+        leverage = overrides.get('leverage_override')
+        if leverage is not None:
+            account_settings.leverage_by_volatility = {
+                'low': leverage,
+                'medium': leverage,
+                'high': leverage,
+            }
+
+        # TP settings override
+        tp = overrides.get('tp_settings')
+        if tp and isinstance(tp, dict):
+            if 'basket_tp_roi' in tp:
+                account_settings.basket_tp_roi.update(tp['basket_tp_roi'])
+            if 'individual_tp_atr_mult' in tp:
+                account_settings.individual_tp_atr_mult = tp['individual_tp_atr_mult']
+
+        # SL settings override
+        sl = overrides.get('sl_settings')
+        if sl and isinstance(sl, dict):
+            if 'basket_sl_pct' in sl:
+                account_settings.basket_sl_pct = sl['basket_sl_pct']
+            if 'individual_sl_atr_mult' in sl:
+                account_settings.individual_sl_atr_mult = sl['individual_sl_atr_mult']
+            if 'emergency_sl_account_pct' in sl:
+                account_settings.emergency_sl_account_pct = sl['emergency_sl_account_pct']
+
+        return account_settings
 
     # ─────────────────────────────────────────
     # Instance Methods

@@ -1,6 +1,4 @@
 {
-    "api_key": "i6JoBEufx4K2BYpBHwXeCyEdxZi4a7ubFBkbuVhFfYnYvm3k1ntZ0OTPG7zxuK0j",
-    "api_secret": "3OCgL89YCW5gMJX31GvA8t4BXBUZkS92L2X2h00DAKvoypUbxidKptYAu0KoaE2M",
     "use_testnet": false,
 
     "scan_interval_seconds": 600,
@@ -49,15 +47,16 @@
         "high": 5
     },
 
-  "position_margin_tiers": [
-  {"max_balance": 50, "margin_range": [2.0, 4.0], "max_positions": 2},
-  {"max_balance": 100, "margin_range": [3.0, 5.0], "max_positions": 3},
-  {"max_balance": 999999999, "margin_range": [5.0, 8.0], "max_positions": 5}
-],
+    "position_margin_tiers": [
+        {"max_balance": 50, "margin_range": [2.0, 4.0], "max_positions": 2},
+        {"max_balance": 100, "margin_range": [3.0, 5.0], "max_positions": 3},
+        {"max_balance": 999999999, "margin_range": [5.0, 8.0], "max_positions": 5}
+    ],
 
     "slippage_pct": 0.0005,
     "taker_fee_pct": 0.0004,
     "maker_fee_pct": 0.0004,
 
+    "database_url": "postgresql://zengrid:zengrid@localhost:5432/zengrid",
     "log_level": "INFO"
 }

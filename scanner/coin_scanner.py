@@ -14,7 +14,7 @@ import pandas as pd
 
 from config.settings import Settings
 from core.database import Database
-from core.models import CoinScore
+from core.dto import CoinScore
 from exchange.client import ExchangeClient
 from signals.indicators import compute_atr
 

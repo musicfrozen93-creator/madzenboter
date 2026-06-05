@@ -28,7 +28,7 @@ try:
     settings = Settings.load('config/config.json')
     db_url = settings.database_url
 except Exception:
-    db_url = os.environ.get('DATABASE_URL', 'postgresql://zengrid:zengrid@localhost:5432/zengrid')
+    db_url = os.environ.get('DATABASE_URL', 'postgresql://trading_bot:trading_bot@localhost:5432/trading_bot')
 
 config.set_main_option('sqlalchemy.url', db_url)
 

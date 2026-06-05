@@ -57,6 +57,6 @@
     "taker_fee_pct": 0.0004,
     "maker_fee_pct": 0.0004,
 
-    "database_url": "postgresql://zengrid:zengrid@localhost:5432/zengrid",
+    "database_url": "postgresql://trading_bot:trading_bot@localhost:5432/trading_bot",
     "log_level": "INFO"
 }

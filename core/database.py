@@ -56,7 +56,7 @@ class Database:
         self.db_url = (
             db_url
             or os.environ.get('DATABASE_URL')
-            or 'postgresql://zengrid:zengrid@localhost:5432/zengrid'
+            or 'postgresql://trading_bot:trading_bot@localhost:5432/trading_bot'
         )
 
         self.engine = create_engine(

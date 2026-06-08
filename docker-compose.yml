@@ -6,8 +6,8 @@ services:
     container_name: zengrid-postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: trading_bot
-      POSTGRES_USER: trading_bot
+      POSTGRES_DB: zengrid
+      POSTGRES_USER: zengrid
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trading_bot_dev_password}
     volumes:
       - pgdata:/var/lib/postgresql/data

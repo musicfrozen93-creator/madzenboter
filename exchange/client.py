@@ -56,6 +56,27 @@ class ExchangeClient:
         """
         return cls(settings, api_key=api_key, api_secret=api_secret)
 
+    @classmethod
+    def for_market_data(cls, settings: Settings) -> 'ExchangeClient':
+        """Create a PUBLIC, keyless client for market data only.
+
+        Used by the scanner and signal engine. It carries no API credentials
+        and is structurally unable to place orders or read balances — those
+        require per-account clients created via ``for_account``.
+
+        Args:
+            settings: Application settings (non-credential config only).
+
+        Returns:
+            A new keyless ExchangeClient for public market data.
+        """
+        return cls(settings, api_key='', api_secret='')
+
+    @property
+    def has_credentials(self) -> bool:
+        """True if this client carries trading credentials."""
+        return bool(self._api_key and self._api_secret)
+
     # ───────────────────────────────────────────
     # Initialisation
     # ───────────────────────────────────────────
@@ -66,9 +87,12 @@ class ExchangeClient:
         Sets sandbox mode if use_testnet is True.
         Loads all market information for symbol lookups.
         """
+        # Credentials come ONLY from the per-account keys passed to this client.
+        # There is no fall-back to settings/master/env keys: a client created
+        # without keys (for_market_data) is public/read-only by construction.
         self.exchange = ccxt.binance({
-            'apiKey': self._api_key or self.settings.api_key,
-            'secret': self._api_secret or self.settings.api_secret,
+            'apiKey': self._api_key,
+            'secret': self._api_secret,
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'future',
@@ -76,11 +100,11 @@ class ExchangeClient:
             },
         })
 
+        mode = 'TESTNET' if self.settings.use_testnet else 'LIVE'
         if self.settings.use_testnet:
             self.exchange.set_sandbox_mode(True)
-            logger.info('Exchange initialised in TESTNET mode')
-        else:
-            logger.info('Exchange initialised in LIVE mode')
+        access = 'authenticated' if self.has_credentials else 'public/market-data-only'
+        logger.info('Exchange initialised in %s mode (%s)', mode, access)
 
         self.markets = self.exchange.load_markets()
         logger.info('Loaded %d markets', len(self.markets))
@@ -279,6 +303,13 @@ class ExchangeClient:
         Returns:
             CCXT order response dict.
         """
+        # Hard guard: a keyless (market-data) client must never place orders.
+        if not self.has_credentials:
+            raise PermissionError(
+                'place_market_order called on a keyless market-data client — '
+                'orders are only allowed on per-account clients.'
+            )
+
         params: dict[str, Any] = {}
         if reduce_only:
             params['reduceOnly'] = True

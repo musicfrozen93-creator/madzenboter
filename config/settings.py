@@ -119,6 +119,51 @@ class Settings:
     max_exposure_pct: float = 0.25
     max_drawdown_pct: float = 0.15
 
+    # ── Account-Size-Aware Daily Drawdown ──
+    # Daily drawdown (from the day's starting balance) that pauses NEW entries
+    # until the next UTC day. This is a ROUTINE limit: it auto-resets daily and
+    # never triggers a permanent shutdown. First tier whose max_balance >= balance
+    # wins. Smaller accounts get more room; larger accounts are protected tighter.
+    daily_drawdown_tiers: list = field(
+        default_factory=lambda: [
+            {'max_balance': 50, 'drawdown_pct': 0.15},     # <= $50  → 15%
+            {'max_balance': 200, 'drawdown_pct': 0.10},    # $50–200 → 10%
+            {'max_balance': float('inf'), 'drawdown_pct': 0.05},  # > $200 → 5%
+        ]
+    )
+    # CATASTROPHIC all-time drawdown from the high-water mark. ONLY this (a sign
+    # of a genuine system/logic failure) triggers a permanent emergency shutdown
+    # requiring manual review. Routine daily drawdown does NOT.
+    catastrophic_drawdown_pct: float = 0.50
+
+    # ── Account-Size-Aware Margin Caps ──
+    # Hard ceiling on the TOTAL margin a single basket (all recovery layers
+    # combined) may consume, as a fraction of account balance.
+    # $20 → $2.00, $50 → $5.00, $100 → $10.00, $500 → $50.00.
+    margin_hard_cap_pct: float = 0.10
+    # Target margin for the FIRST entry layer, as a fraction of balance.
+    # Volatility picks within this range (HIGH→low end, LOW→high end).
+    # $20 → $0.50–$1.00, $50 → $1.25–$2.50, $100 → $2.50–$5.00.
+    margin_target_pct_range: list = field(default_factory=lambda: [0.025, 0.05])
+    # Absolute floor — Binance rejects dust orders below this margin.
+    min_margin_floor: float = 0.30
+    # Minimum estimated distance-to-liquidation required to open a position.
+    # Rejects entries whose leverage would place liquidation too close.
+    min_liquidation_distance_pct: float = 0.04
+    # Maintenance-margin rate assumption used for the liquidation-distance estimate.
+    maintenance_margin_rate: float = 0.005
+
+    # ── Market Selection (account-size aware) ──
+    # Accounts at or below this balance are treated as "small" and prefer the
+    # liquid, lower-priced symbols below (finer lot steps → margin fits the cap).
+    small_account_threshold: float = 100.0
+    preferred_small_account_symbols: list = field(
+        default_factory=lambda: [
+            'DOGE/USDT', 'XRP/USDT', 'TRX/USDT', 'ADA/USDT', 'XLM/USDT',
+            'VET/USDT', 'ALGO/USDT', 'SEI/USDT', 'SUI/USDT',
+        ]
+    )
+
     # ── Leverage ──
     leverage_by_volatility: dict = field(
         default_factory=lambda: {'low': 10, 'medium': 8, 'high': 5}
@@ -166,9 +211,12 @@ class Settings:
         with open(path, 'r', encoding='utf-8') as f:
             raw: dict[str, Any] = json.load(f)
 
-        # Override from environment variables if present
-        raw['api_key'] = os.environ.get('BINANCE_API_KEY', raw.get('api_key', ''))
-        raw['api_secret'] = os.environ.get('BINANCE_API_SECRET', raw.get('api_secret', ''))
+        # NOTE: BINANCE_API_KEY / BINANCE_API_SECRET are intentionally NOT read.
+        # The bot has no master/fallback trading account — every trade runs on a
+        # per-user account whose credentials come from the database. The only
+        # exchange access the container needs is keyless public market data.
+        raw['api_key'] = ''
+        raw['api_secret'] = ''
 
         # Database URL from env or config
         raw['database_url'] = os.environ.get(
@@ -186,8 +234,10 @@ class Settings:
         )
 
         # Handle inf serialisation from JSON (stored as large number)
-        tiers = raw.get('position_margin_tiers', [])
-        for tier in tiers:
+        for tier in raw.get('position_margin_tiers', []):
+            if tier.get('max_balance', 0) >= 999_999_999:
+                tier['max_balance'] = float('inf')
+        for tier in raw.get('daily_drawdown_tiers', []):
             if tier.get('max_balance', 0) >= 999_999_999:
                 tier['max_balance'] = float('inf')
 
@@ -297,6 +347,10 @@ class Settings:
     def get_base_margin_range(self, balance: float) -> tuple[float, float]:
         """Return (min_margin, max_margin) for the balance tier.
 
+        Legacy absolute-dollar tier range. Superseded for sizing by
+        get_target_margin_range() (percentage-based, account-size aware) but
+        retained for backward compatibility.
+
         Args:
             balance: Current account balance in USDT.
 
@@ -306,6 +360,44 @@ class Settings:
         tier = self.get_tier(balance)
         mr = tier['margin_range']
         return (mr[0], mr[1])
+
+    # ── Account-Size-Aware Margin & Drawdown helpers ──
+
+    def get_margin_hard_cap(self, balance: float) -> float:
+        """Hard ceiling on TOTAL margin per basket for this balance.
+
+        $20→$2, $50→$5, $100→$10, $500→$50. Never below the dust floor.
+        """
+        return max(self.min_margin_floor, balance * self.margin_hard_cap_pct)
+
+    def get_target_margin_range(self, balance: float) -> tuple[float, float]:
+        """(min, max) target margin for the FIRST entry layer, in USDT.
+
+        Percentage of balance so sizing scales with account size:
+        $20 → ~$0.50–$1.00. Clamped to the dust floor and the hard cap.
+        """
+        lo_pct, hi_pct = self.margin_target_pct_range
+        hard_cap = self.get_margin_hard_cap(balance)
+        lo = min(max(self.min_margin_floor, balance * lo_pct), hard_cap)
+        hi = min(max(lo, balance * hi_pct), hard_cap)
+        return (lo, hi)
+
+    def get_daily_drawdown_limit(self, balance: float) -> float:
+        """Account-size-aware daily drawdown limit (fraction).
+
+        <= $50 → 0.15, $50–200 → 0.10, > $200 → 0.05.
+        """
+        for tier in self.daily_drawdown_tiers:
+            if balance <= tier['max_balance']:
+                return tier['drawdown_pct']
+        return self.daily_drawdown_tiers[-1]['drawdown_pct']
+
+    def is_preferred_symbol(self, symbol: str) -> bool:
+        """True if the symbol's base asset is in the small-account preferred list."""
+        base = symbol.split('/')[0].upper()
+        return base in {
+            s.split('/')[0].upper() for s in self.preferred_small_account_symbols
+        }
 
     def get_leverage(self, volatility: VolatilityLevel) -> int:
         """Lookup dynamic leverage based on volatility.
@@ -337,10 +429,10 @@ class Settings:
         """
         issues: list[str] = []
 
-        if not self.use_testnet and not self.api_key:
-            issues.append('api_key is required for live trading')
-        if not self.use_testnet and not self.api_secret:
-            issues.append('api_secret is required for live trading')
+        # NOTE: Master/VPS exchange API keys are intentionally NOT required.
+        # The bot trades exclusively on per-user accounts loaded from the
+        # database (decrypted with MASTER_ENCRYPTION_KEY). The only exchange
+        # access the bot container itself needs is keyless PUBLIC market data.
         if self.recovery_max_layers < 1 or self.recovery_max_layers > 10:
             issues.append('recovery_max_layers must be between 1 and 10')
         if len(self.recovery_margin_multipliers) != self.recovery_max_layers:

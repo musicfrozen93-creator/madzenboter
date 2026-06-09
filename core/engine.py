@@ -23,14 +23,8 @@ from typing import List
 
 from config.settings import Settings
 from core.database import Database
-from core.dto import Basket, CoinScore
+from core.dto import CoinScore
 from exchange.client import ExchangeClient
-from grid.position_manager import PositionManager
-from grid.recovery import RecoverySystem
-from grid.take_profit import TakeProfitManager
-from risk.position_sizer import PositionSizer
-from risk.risk_manager import RiskManager
-from risk.stop_loss import StopLossManager
 from scanner.coin_scanner import CoinScanner
 from signals.signal_engine import SignalEngine
 
@@ -77,9 +71,11 @@ class TradingEngine:
         self._running = False
         self._last_scan_time = 0.0
         self._last_status_log = 0.0
-        self._active_baskets: List[Basket] = []
         self._watchlist: List[CoinScore] = []
-        self._multi_account_mode = False
+        # Account-based trading is the ONLY mode. _account_trading_enabled is True
+        # once the encryption service is available to decrypt per-user credentials.
+        self._account_trading_enabled = False
+        self._account_manager = None
         self._signal_executor = None
         self._sync_service = None
         self._api_thread = None
@@ -91,36 +87,22 @@ class TradingEngine:
         self.database = Database(settings.database_url)
         self.database.initialize()
 
-        # Exchange (master account)
-        self.exchange_client = ExchangeClient(settings)
+        # Exchange client for PUBLIC market data only (scanner + signals).
+        # Carries NO API keys and cannot place orders. All trading uses
+        # per-account clients built from database credentials.
+        self.exchange_client = ExchangeClient.for_market_data(settings)
 
-        # Scanner & Signals
+        # Scanner & Signals (read-only market data)
         self.scanner = CoinScanner(self.exchange_client, settings, self.database)
         self.signal_engine = SignalEngine(self.exchange_client, settings)
 
-        # Risk
-        self.risk_manager = RiskManager(settings, self.database)
-        self.position_sizer = PositionSizer(settings)
-        self.sl_manager = StopLossManager(settings)
+        # NOTE: There is intentionally NO engine-level (global) RiskManager or
+        # PositionManager. All risk state, position sizing, and shutdown state
+        # live PER-ACCOUNT inside the SignalExecutor (each account gets its own
+        # RiskManager bound to an account-isolated state namespace). This removes
+        # any global/shared risk state and any single global shutdown.
 
-        # Grid
-        self.recovery_system = RecoverySystem(settings)
-        self.tp_manager = TakeProfitManager(settings)
-
-        # Position Manager (depends on all above)
-        self.position_manager = PositionManager(
-            exchange_client=self.exchange_client,
-            settings=settings,
-            database=self.database,
-            risk_manager=self.risk_manager,
-            position_sizer=self.position_sizer,
-            recovery_system=self.recovery_system,
-            tp_manager=self.tp_manager,
-            sl_manager=self.sl_manager,
-            signal_engine=self.signal_engine,
-        )
-
-        # Multi-account components (initialized if encryption key is present)
+        # Per-account trading components (require the encryption key)
         self._init_multi_account()
 
     # ───────────────────────────────────────────
@@ -128,10 +110,17 @@ class TradingEngine:
     # ───────────────────────────────────────────
 
     def _init_multi_account(self) -> None:
-        """Initialize multi-account components if encryption key is configured."""
+        """Initialize the database-account trading components.
+
+        The encryption service is REQUIRED to decrypt per-user API credentials.
+        Without it the bot cannot trade any account and runs in market-data-only
+        mode (it will never fall back to master/VPS keys).
+        """
         if not self.settings.master_encryption_key:
-            logger.info(
-                'MASTER_ENCRYPTION_KEY not set — running in single-account mode'
+            logger.critical(
+                'MASTER_ENCRYPTION_KEY not set — cannot decrypt user account '
+                'credentials. The bot will run in MARKET-DATA-ONLY mode and will '
+                'NOT trade. Set MASTER_ENCRYPTION_KEY to enable account trading.'
             )
             return
 
@@ -159,29 +148,18 @@ class TradingEngine:
                 encryption=self._encryption,
                 settings=self.settings,
             )
-
-            # Check if any accounts are configured
-            accounts = self._account_manager.get_active_accounts()
-            if accounts:
-                self._multi_account_mode = True
-                logger.info(
-                    'Multi-account mode ACTIVE — %d accounts loaded', len(accounts)
-                )
-            else:
-                logger.info(
-                    'Multi-account mode available but no accounts configured — '
-                    'using master account'
-                )
+            self._account_trading_enabled = True
+            logger.info('Database-account trading ENABLED (per-user isolated execution)')
 
         except ImportError as e:
-            logger.warning(
-                'Multi-account dependencies not available: %s — '
-                'running in single-account mode', e,
+            logger.critical(
+                'Account-trading dependencies not available: %s — '
+                'running in market-data-only mode (NO trading).', e,
             )
         except Exception as e:
-            logger.error(
-                'Failed to initialize multi-account components: %s — '
-                'falling back to single-account mode', e,
+            logger.critical(
+                'Failed to initialize account-trading components: %s — '
+                'running in market-data-only mode (NO trading).', e,
             )
 
     # ───────────────────────────────────────────
@@ -286,50 +264,44 @@ class TradingEngine:
         logger.info('  Testnet: %s', self.settings.use_testnet)
         logger.info(
             '  Mode: %s',
-            'MULTI-ACCOUNT' if self._multi_account_mode else 'SINGLE-ACCOUNT',
+            'DATABASE-ACCOUNTS' if self._account_trading_enabled
+            else 'MARKET-DATA-ONLY (no trading)',
         )
         logger.info('=' * 60)
 
+        # Initialise the PUBLIC market-data client (loads markets; no keys).
         try:
             self.exchange_client.initialize()
         except Exception as e:
-            logger.critical('Failed to initialise exchange: %s', e)
+            logger.critical('Failed to initialise market-data client: %s', e)
             return
 
-        # Fetch initial balance
-        try:
-            balance_info = self.exchange_client.fetch_balance()
-            balance = balance_info['total']
-            logger.info('Master account balance: %.2f USDT', balance)
-        except Exception as e:
-            logger.critical('Failed to fetch balance: %s', e)
-            return
-
-        if balance < 5.0 and not self._multi_account_mode:
-            logger.critical(
-                'Balance too low (%.2f USDT). Minimum recommended: 30 USDT', balance
+        # ── Load trading accounts from the database (single source of truth) ──
+        # No master balance, no master risk state, no minimum-balance gate.
+        if not self._account_trading_enabled:
+            logger.warning(
+                'Account trading is DISABLED (no encryption service). The engine '
+                'will scan markets but place no trades.'
             )
-            return
+        else:
+            try:
+                active = self._account_manager.get_active_accounts()
+                tradeable = self.database.get_tradeable_accounts()
+                if not active:
+                    logger.warning(
+                        'No active accounts found — starting successfully. The bot '
+                        'will NOT trade until users connect accounts via the website.'
+                    )
+                else:
+                    logger.info(
+                        'Loaded %d active account(s); %d currently tradeable '
+                        '(active user + active subscription).',
+                        len(active), len(tradeable),
+                    )
+            except Exception as e:
+                logger.error('Failed to load accounts at startup: %s', e)
 
-        # Initialise risk manager
-        self.risk_manager.initialize(balance)
-
-        # Check emergency shutdown
-        if self.risk_manager.is_emergency_shutdown():
-            reason = self.database.get_state('emergency_shutdown_reason') or 'Unknown'
-            logger.critical(
-                '🚨 Emergency shutdown is ACTIVE (reason: %s). '
-                'Run with --clear-shutdown to resume trading.',
-                reason,
-            )
-            return
-
-        # Load persisted baskets
-        self._active_baskets = self.database.load_active_baskets()
-        if self._active_baskets:
-            logger.info('Resumed %d active baskets', len(self._active_baskets))
-
-        # Load persisted watchlist
+        # Load persisted watchlist (shared market data)
         self._watchlist = self.database.get_watchlist()
 
         # Validate settings
@@ -349,50 +321,18 @@ class TradingEngine:
         self._run_loop()
 
     def _run_loop(self) -> None:
-        """Main trading loop."""
+        """Main trading loop — purely database-account driven.
+
+        The engine itself holds NO trading balance, NO global risk state, and
+        NO global shutdown. It only: (1) refreshes shared market data, then
+        (2) delegates per-account management and signal execution to the
+        SignalExecutor, where each account runs as an independent entity.
+        """
         while self._running:
             loop_start = time.time()
 
             try:
-                # 1. Fetch current balance (master account)
-                balance_info = self.exchange_client.fetch_balance()
-                balance = balance_info['total']
-
-                # 2. Update HWM & daily reset
-                self.risk_manager.update_high_water_mark(balance)
-                self.risk_manager.record_daily_start(balance)
-
-                # 3. Check daily loss limit (master account)
-                if not self._multi_account_mode and self.risk_manager.check_daily_loss_limit(balance):
-                    logger.warning(
-                        '⚠️ Daily loss limit (5%%) reached! '
-                        'Closing all positions and pausing until next UTC day.'
-                    )
-                    trades = self.position_manager.close_all_baskets(
-                        self._active_baskets, 'daily_limit'
-                    )
-                    self._active_baskets = []
-                    logger.info('Closed %d baskets due to daily limit', len(trades))
-                    self._wait_until_next_day()
-                    continue
-
-                # 4. Check drawdown limit (master account)
-                if not self._multi_account_mode and self.risk_manager.check_drawdown_limit(balance):
-                    logger.critical(
-                        '🚨 MAX DRAWDOWN (15%%) REACHED! '
-                        'Emergency shutdown triggered.'
-                    )
-                    self.position_manager.close_all_baskets(
-                        self._active_baskets, 'drawdown'
-                    )
-                    self._active_baskets = []
-                    self.risk_manager.trigger_emergency_shutdown(
-                        'Max drawdown exceeded'
-                    )
-                    self.stop()
-                    break
-
-                # 5. Run coin scanner at interval
+                # 1. Run coin scanner at interval (public market data)
                 if time.time() - self._last_scan_time >= self.settings.scan_interval_seconds:
                     try:
                         self._watchlist = self.scanner.scan()
@@ -400,111 +340,75 @@ class TradingEngine:
                     except Exception as e:
                         logger.error('Scan failed: %s', e)
 
-                # 6. Manage existing positions
-                if self._multi_account_mode and self._signal_executor:
-                    # Multi-account: manage baskets for all accounts
+                # 2. If account trading is disabled, scan only — never trade.
+                if not (self._account_trading_enabled and self._signal_executor):
+                    self._log_status()
+                    elapsed = time.time() - loop_start
+                    time.sleep(max(1.0, self.settings.loop_interval_seconds - elapsed))
+                    continue
+
+                # 3. Manage existing positions for EVERY active account.
+                #    Each account is handled in isolation inside the executor;
+                #    one account's failure never affects the others.
+                try:
+                    self._signal_executor.manage_all_accounts()
+                except Exception as e:
+                    logger.error('Per-account basket management error: %s', e)
+
+                # 4. Generate signals from the shared watchlist and fan each out.
+                #    Per-account eligibility (subscription) and per-account risk
+                #    limits decide independently whether each account takes it.
+                for coin in self._watchlist:
                     try:
-                        self._signal_executor.manage_all_accounts()
-                    except Exception as e:
-                        logger.error('Multi-account basket management error: %s', e)
-                elif self._active_baskets:
-                    # Single-account: manage baskets directly
-                    self._active_baskets = self.position_manager.manage_baskets(
-                        self._active_baskets, balance
-                    )
-
-                # 7. Look for new entries
-                current_symbols = {b.symbol for b in self._active_baskets}
-                max_positions = self.settings.get_max_positions(balance)
-
-                if len(self._active_baskets) < max_positions:
-                    for coin in self._watchlist:
-                        if coin.symbol in current_symbols:
+                        sig = self.signal_engine.generate_signal(coin.symbol)
+                        if not sig:
                             continue
-                        if len(self._active_baskets) >= max_positions:
-                            break
+                        results = self._signal_executor.execute_signal(sig)
+                        if results:
+                            success_count = sum(1 for r in results if r.success)
+                            logger.info(
+                                'Signal %s %s fanned out — %d/%d eligible accounts handled',
+                                sig.side.upper(), coin.symbol,
+                                success_count, len(results),
+                            )
+                    except Exception as e:
+                        logger.debug('Signal error for %s: %s', coin.symbol, e)
 
-                        try:
-                            sig = self.signal_engine.generate_signal(coin.symbol)
-                            if sig:
-                                if self._multi_account_mode and self._signal_executor:
-                                    # Multi-account: fan out to all accounts
-                                    results = self._signal_executor.execute_signal(sig)
-                                    success_count = sum(
-                                        1 for r in results if r.success
-                                    )
-                                    if success_count > 0:
-                                        current_symbols.add(coin.symbol)
-                                        logger.info(
-                                            'Signal %s %s executed on %d/%d accounts',
-                                            sig.side.upper(), coin.symbol,
-                                            success_count, len(results),
-                                        )
-                                else:
-                                    # Single-account: direct execution
-                                    basket = self.position_manager.open_position(
-                                        sig, balance
-                                    )
-                                    if basket:
-                                        self._active_baskets.append(basket)
-                                        current_symbols.add(basket.symbol)
-                                        # Refresh balance after entry
-                                        balance = self.exchange_client.fetch_balance()['total']
-                        except Exception as e:
-                            logger.debug('Signal error for %s: %s', coin.symbol, e)
-
-                # 8. Log periodic status
-                self._log_status(balance)
+                # 5. Log periodic status
+                self._log_status()
 
             except Exception as e:
                 logger.error('Main loop error: %s\n%s', e, traceback.format_exc())
                 time.sleep(5)
 
-            # 9. Sleep for remainder of interval
+            # Sleep for remainder of interval
             elapsed = time.time() - loop_start
             sleep_time = max(1.0, self.settings.loop_interval_seconds - elapsed)
             time.sleep(sleep_time)
 
-    def _wait_until_next_day(self) -> None:
-        """Sleep until the next UTC day begins."""
-        logger.info('Waiting for next UTC day to resume trading...')
-        while self._running:
-            now = datetime.now(timezone.utc)
-            current_day = now.strftime('%Y-%m-%d')
-            if current_day != self.risk_manager._current_date:
-                logger.info('New UTC day (%s) — resuming trading', current_day)
-                balance = self.exchange_client.fetch_balance()['total']
-                self.risk_manager.record_daily_start(balance)
-                break
-            time.sleep(60)
+    def _log_status(self) -> None:
+        """Log periodic engine status every 5 minutes (account-based).
 
-    def _log_status(self, balance: float) -> None:
-        """Log periodic status every 5 minutes.
-
-        Args:
-            balance: Current account balance.
+        Reports active vs tradeable account counts — there is no global bot
+        balance or global risk state to report; those live per-account.
         """
         now = time.time()
         if now - self._last_status_log < 300:
             return
         self._last_status_log = now
 
-        total_unrealized = 0.0
-        basket_info = []
-        for basket in self._active_baskets:
+        active = tradeable = '?'
+        if self._account_trading_enabled and self._account_manager:
             try:
-                basket_info.append(
-                    f'{basket.symbol}({basket.side[0].upper()}{basket.layer_count}L)'
-                )
-            except Exception:
-                basket_info.append(f'{basket.symbol}(?)')
+                active = len(self._account_manager.get_active_accounts())
+                tradeable = len(self.database.get_tradeable_accounts())
+            except Exception as e:
+                logger.debug('Status account count failed: %s', e)
 
-        mode = 'multi' if self._multi_account_mode else 'single'
+        mode = 'DATABASE-ACCOUNTS' if self._account_trading_enabled else 'MARKET-DATA-ONLY'
         logger.info(
-            'STATUS | mode=%s | balance=%.2f USDT | baskets=%d [%s] | watchlist=%d',
-            mode, balance, len(self._active_baskets),
-            ', '.join(basket_info) if basket_info else 'none',
-            len(self._watchlist),
+            'STATUS | mode=%s | accounts active=%s tradeable=%s | watchlist=%d',
+            mode, active, tradeable, len(self._watchlist),
         )
 
     def start_api_server(self) -> None:

@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Generator, List, Optional
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, or_, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from core.dto import Basket, CoinScore, RecoveryLayer, TradeRecord
@@ -473,17 +473,94 @@ class Database:
     # ───────────────────────────────────────────
 
     def get_active_accounts(self) -> List[AccountModel]:
-        """Fetch all active trading accounts.
+        """Fetch all active trading accounts (account flag only).
 
         Returns:
-            List of AccountModel ORM instances.
+            List of AccountModel ORM instances where is_active is True.
         """
         with self.session() as session:
             return (
                 session.query(AccountModel)
                 .filter(AccountModel.is_active.is_(True))
+                .order_by(AccountModel.id)
                 .all()
             )
+
+    def get_tradeable_accounts(self) -> List[AccountModel]:
+        """Fetch accounts eligible to OPEN new trades.
+
+        The database is the single source of truth. An account is tradeable
+        only when ALL hold:
+          • the account is enabled (accounts.is_active)
+          • the owning user exists and is active (users.is_active)
+          • the user has an active, non-expired subscription
+            (subscriptions.status = 'active' AND (expires_at IS NULL OR > now))
+
+        Returns:
+            List of eligible AccountModel ORM instances, ordered by id.
+        """
+        now = datetime.now(timezone.utc)
+        with self.session() as session:
+            active_sub_user_ids = (
+                session.query(SubscriptionModel.user_id)
+                .filter(SubscriptionModel.status == 'active')
+                .filter(or_(
+                    SubscriptionModel.expires_at.is_(None),
+                    SubscriptionModel.expires_at > now,
+                ))
+            )
+            return (
+                session.query(AccountModel)
+                .join(UserModel, AccountModel.user_id == UserModel.id)
+                .filter(AccountModel.is_active.is_(True))
+                .filter(UserModel.is_active.is_(True))
+                .filter(AccountModel.user_id.in_(active_sub_user_ids))
+                .order_by(AccountModel.id)
+                .all()
+            )
+
+    def get_account_eligibility(self) -> List[tuple]:
+        """Per-account trade eligibility with a human-readable reason.
+
+        Evaluates every account that is enabled at the account level and
+        reports why it is or isn't tradeable. Used for transparent skip
+        logging during signal fan-out.
+
+        Returns:
+            List of (AccountModel, eligible: bool, reason: str).
+        """
+        now = datetime.now(timezone.utc)
+        results: List[tuple] = []
+        with self.session() as session:
+            accounts = (
+                session.query(AccountModel)
+                .filter(AccountModel.is_active.is_(True))
+                .order_by(AccountModel.id)
+                .all()
+            )
+            for acct in accounts:
+                user = session.get(UserModel, acct.user_id)
+                if user is None:
+                    results.append((acct, False, 'owning user not found'))
+                    continue
+                if not user.is_active:
+                    results.append((acct, False, 'user suspended'))
+                    continue
+                sub = (
+                    session.query(SubscriptionModel)
+                    .filter(SubscriptionModel.user_id == acct.user_id)
+                    .filter(SubscriptionModel.status == 'active')
+                    .filter(or_(
+                        SubscriptionModel.expires_at.is_(None),
+                        SubscriptionModel.expires_at > now,
+                    ))
+                    .first()
+                )
+                if sub is None:
+                    results.append((acct, False, 'no active subscription'))
+                    continue
+                results.append((acct, True, 'OK'))
+        return results
 
     def get_account_by_id(self, account_id: int) -> Optional[AccountModel]:
         """Fetch a single account by ID.

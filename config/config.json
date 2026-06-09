@@ -12,15 +12,19 @@
     "atr_period": 14,
     "rsi_oversold": 30.0,
     "rsi_overbought": 70.0,
+    "rsi_long_threshold": 40.0,
+    "rsi_short_threshold": 60.0,
+    "require_ema_trend_filter": true,
     "adx_trend_threshold": 25.0,
     "adx_sideways_threshold": 20.0,
     "high_vol_atr_multiplier": 1.5,
     "low_vol_atr_multiplier": 0.7,
 
-    "max_watchlist_size": 5,
+    "max_watchlist_size": 25,
     "min_volume_24h": 50000000,
     "max_funding_rate": 0.001,
     "min_coin_age_days": 30,
+    "preferred_symbol_score_boost": 0.15,
 
     "recovery_max_layers": 4,
     "recovery_margin_multipliers": [1.0, 1.33, 1.67, 2.17],
@@ -56,8 +60,10 @@
 
     "small_account_threshold": 100.0,
     "preferred_small_account_symbols": [
-        "DOGE/USDT", "XRP/USDT", "TRX/USDT", "ADA/USDT", "XLM/USDT",
-        "VET/USDT", "ALGO/USDT", "SEI/USDT", "SUI/USDT"
+        "DOGE/USDT", "XRP/USDT", "ADA/USDT", "TRX/USDT", "SUI/USDT",
+        "LINK/USDT", "ATOM/USDT", "AVAX/USDT", "ETC/USDT", "BCH/USDT",
+        "FET/USDT", "INJ/USDT", "NEAR/USDT", "HBAR/USDT", "ALGO/USDT",
+        "VET/USDT", "FIL/USDT", "APT/USDT", "ARB/USDT", "OP/USDT"
     ],
 
     "leverage_by_volatility": {

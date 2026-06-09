@@ -337,6 +337,10 @@ class TradingEngine:
                     try:
                         self._watchlist = self.scanner.scan()
                         self._last_scan_time = time.time()
+                        wl = ', '.join(
+                            f'{c.symbol}({c.composite_score:.2f})' for c in self._watchlist
+                        ) or 'EMPTY'
+                        logger.info('WATCHLIST | %d symbols: %s', len(self._watchlist), wl)
                     except Exception as e:
                         logger.error('Scan failed: %s', e)
 
@@ -358,11 +362,20 @@ class TradingEngine:
                 # 4. Generate signals from the shared watchlist and fan each out.
                 #    Per-account eligibility (subscription) and per-account risk
                 #    limits decide independently whether each account takes it.
+                if not self._watchlist:
+                    logger.warning(
+                        'WATCHLIST_EMPTY | no symbols to evaluate — scanner has not '
+                        'populated a watchlist yet (no signals possible).'
+                    )
+                evaluated = 0
+                found = 0
                 for coin in self._watchlist:
                     try:
+                        evaluated += 1
                         sig = self.signal_engine.generate_signal(coin.symbol)
                         if not sig:
-                            continue
+                            continue  # signal_engine logs SIGNAL_REJECTED with the reason
+                        found += 1
                         results = self._signal_executor.execute_signal(sig)
                         if results:
                             success_count = sum(1 for r in results if r.success)
@@ -373,6 +386,13 @@ class TradingEngine:
                             )
                     except Exception as e:
                         logger.debug('Signal error for %s: %s', coin.symbol, e)
+
+                if evaluated:
+                    logger.info(
+                        'SIGNAL_FUNNEL | watchlist=%d evaluated=%d signals_found=%d '
+                        'rejected_at_signal=%d (per-account accept/reject logged above)',
+                        len(self._watchlist), evaluated, found, evaluated - found,
+                    )
 
                 # 5. Log periodic status
                 self._log_status()

@@ -83,11 +83,18 @@ class PositionManager:
 
         leverage = self.settings.get_leverage(vol)
 
+        logger.info(
+            'POSITION_OPEN_REQUEST %s %s | balance=%.2f vol=%s lev=%dx price=%.4f',
+            signal.side.upper(), signal.symbol, balance, vol.value, leverage,
+            signal.current_price,
+        )
+
         # Get market info for quantity calculation
         try:
             market_info = self.exchange.get_symbol_info(signal.symbol)
         except Exception as e:
             logger.error('Failed to get market info for %s: %s', signal.symbol, e)
+            logger.info('SIGNAL_REJECTED %s | stage=market_info | %s', signal.symbol, e)
             return None
 
         # ── Account-size-aware order plan + symbol suitability ──
@@ -103,8 +110,8 @@ class PositionManager:
 
         if not plan['suitable']:
             logger.info(
-                'SYMBOL REJECTED %s | reason=%s | balance=%.2f price=%.4f lev=%dx '
-                '| req_margin=%.2f notional=%.2f liq_dist=%.1f%% hard_cap=%.2f',
+                'SIGNAL_REJECTED %s | stage=suitability | reason=%s | balance=%.2f '
+                'price=%.4f lev=%dx req_margin=%.2f notional=%.2f liq_dist=%.1f%% hard_cap=%.2f',
                 signal.symbol, plan['reason'], balance, signal.current_price,
                 leverage, margin, plan['notional'],
                 plan['liquidation_distance_pct'] * 100, plan['hard_cap'],
@@ -115,16 +122,27 @@ class PositionManager:
         active_baskets = self.database.load_active_baskets()
         current_exposure = sum(b.total_margin for b in active_baskets)
 
+        # Existing-basket protection: never open a second basket on the same symbol.
+        if any(b.symbol == signal.symbol for b in active_baskets):
+            logger.info(
+                'SIGNAL_REJECTED %s | stage=existing_basket | an active basket already exists for this symbol',
+                signal.symbol,
+            )
+            return None
+
         # Pre-trade risk check
         allowed, reason = self.risk_manager.can_open_position(
             margin, balance, current_exposure, len(active_baskets)
         )
         if not allowed:
-            logger.info('Position blocked for %s: %s', signal.symbol, reason)
+            logger.info(
+                'SIGNAL_REJECTED %s | stage=risk | reason=%s | margin=%.2f exposure=%.2f positions=%d',
+                signal.symbol, reason, margin, current_exposure, len(active_baskets),
+            )
             return None
 
         logger.info(
-            'SYMBOL SELECTED %s %s | balance=%.2f lev=%dx | margin=%.2f '
+            'SIGNAL_ACCEPTED %s %s | balance=%.2f lev=%dx | margin=%.2f '
             'notional=%.2f qty=%.8f liq_dist=%.1f%% hard_cap=%.2f',
             signal.side.upper(), signal.symbol, balance, leverage, margin,
             plan['notional'], quantity, plan['liquidation_distance_pct'] * 100,
@@ -164,6 +182,11 @@ class PositionManager:
             basket.add_layer(layer)
             self.database.save_basket(basket)
 
+            logger.info(
+                'POSITION_OPEN_SUCCESS %s %s | basket=%s price=%.4f qty=%.8f margin=%.2f lev=%dx',
+                signal.side.upper(), signal.symbol, basket.id[:8],
+                fill_price, quantity, margin, leverage,
+            )
             trade_logger.info(
                 'OPEN %s %s L1 | price=%.4f qty=%.8f margin=%.4f '
                 'lev=%dx vol=%s regime=%s | basket=%s',
@@ -176,6 +199,7 @@ class PositionManager:
 
         except Exception as e:
             logger.error('Failed to open position for %s: %s', signal.symbol, e)
+            logger.info('SIGNAL_REJECTED %s | stage=order_submission | %s', signal.symbol, e)
             return None
 
     # ───────────────────────────────────────────

@@ -106,9 +106,10 @@ class SignalEngine:
                 symbol, self.settings.trend_timeframe, limit=250
             )
             if len(df_1h) < self.settings.ema_period:
-                logger.debug(
-                    '%s: insufficient 1h data (%d bars, need %d)',
-                    symbol, len(df_1h), self.settings.ema_period,
+                logger.info(
+                    'SIGNAL_REJECTED %s | stage=data | insufficient 1h data '
+                    '(%d bars, need %d for EMA%d)',
+                    symbol, len(df_1h), self.settings.ema_period, self.settings.ema_period,
                 )
                 return None
 
@@ -116,7 +117,10 @@ class SignalEngine:
                 symbol, self.settings.signal_timeframe, limit=100
             )
             if len(df_5m) < self.settings.rsi_period + 5:
-                logger.debug('%s: insufficient 5m data', symbol)
+                logger.info(
+                    'SIGNAL_REJECTED %s | stage=data | insufficient 5m data (%d bars)',
+                    symbol, len(df_5m),
+                )
                 return None
 
             # ── Compute indicators ──
@@ -145,22 +149,55 @@ class SignalEngine:
             # ── Classify market ──
             regime, volatility = self.classify_market(df_1h, df_5m)
 
-            # ── Entry conditions (RSI + EMA200 ONLY) ──
+            # ── Entry conditions (configurable RSI thresholds + optional EMA200 trend filter) ──
+            # LONG  = (price > EMA200 if trend filter on) AND RSI < rsi_long_threshold
+            # SHORT = (price < EMA200 if trend filter on) AND RSI > rsi_short_threshold
+            # Thresholds come from config (defaults 40/60); the EMA filter is
+            # mandatory by default and protects the averaging grid from trends.
+            long_thr = self.settings.rsi_long_threshold
+            short_thr = self.settings.rsi_short_threshold
+            require_ema = self.settings.require_ema_trend_filter
+
+            ema_ok_long = (not require_ema) or (current_price > latest_ema)
+            ema_ok_short = (not require_ema) or (current_price < latest_ema)
+            ema_status = (
+                'above' if current_price > latest_ema
+                else 'below' if current_price < latest_ema else 'at'
+            ) + ' EMA200'
+
             side: Optional[str] = None
             strength: float = 0.0
 
-            if current_price > latest_ema and latest_rsi < self.settings.rsi_oversold:
-                # LONG: price above trend, RSI oversold
+            if ema_ok_long and latest_rsi < long_thr:
+                # LONG: (uptrend) RSI pulled back below the long threshold
                 side = 'long'
-                strength = (self.settings.rsi_oversold - latest_rsi) / self.settings.rsi_oversold
-            elif current_price < latest_ema and latest_rsi > self.settings.rsi_overbought:
-                # SHORT: price below trend, RSI overbought
+                strength = (long_thr - latest_rsi) / long_thr if long_thr > 0 else 0.5
+            elif ema_ok_short and latest_rsi > short_thr:
+                # SHORT: (downtrend) RSI pushed above the short threshold
                 side = 'short'
-                strength = (latest_rsi - self.settings.rsi_overbought) / (
-                    100.0 - self.settings.rsi_overbought
-                )
+                denom = (100.0 - short_thr) or 1.0
+                strength = (latest_rsi - short_thr) / denom
 
             if side is None:
+                # Explain which filter blocked entry, with live indicator values.
+                if require_ema and current_price <= latest_ema and latest_rsi < long_thr:
+                    why = (f'RSI<{long_thr:.0f} (long) but EMA trend filter blocked: '
+                           f'price {ema_status} (need above for long)')
+                elif require_ema and current_price >= latest_ema and latest_rsi > short_thr:
+                    why = (f'RSI>{short_thr:.0f} (short) but EMA trend filter blocked: '
+                           f'price {ema_status} (need below for short)')
+                elif ema_ok_long and latest_rsi >= long_thr and latest_rsi <= short_thr:
+                    why = (f'RSI filter: rsi={latest_rsi:.1f} not extreme '
+                           f'(need <{long_thr:.0f} long / >{short_thr:.0f} short)')
+                else:
+                    why = (f'no entry: rsi={latest_rsi:.1f}, price {ema_status} '
+                           f'(thresholds <{long_thr:.0f}/>{short_thr:.0f})')
+                logger.info(
+                    'SIGNAL_REJECTED %s | stage=filter | rsi=%.1f ema=%s price=%.4f ema200=%.4f '
+                    'regime=%s vol=%s | %s',
+                    symbol, latest_rsi, ema_status, current_price, latest_ema,
+                    regime.value, volatility.value, why,
+                )
                 return None
 
             # Clamp strength
@@ -180,13 +217,15 @@ class SignalEngine:
             )
 
             logger.info(
-                'SIGNAL: %s %s | price=%.4f ema200=%.4f rsi=%.1f '
-                'atr=%.6f regime=%s vol=%s strength=%.2f',
-                signal.side.upper(), symbol, current_price, latest_ema,
-                latest_rsi, latest_atr, regime.value, volatility.value, strength,
+                'SIGNAL_FOUND %s %s | rsi=%.1f ema=%s price=%.4f ema200=%.4f '
+                'atr=%.6f regime=%s vol=%s strength=%.2f (thresholds <%.0f/>%.0f)',
+                signal.side.upper(), symbol, latest_rsi, ema_status, current_price,
+                latest_ema, latest_atr, regime.value, volatility.value, strength,
+                long_thr, short_thr,
             )
             return signal
 
         except Exception as e:
             logger.warning('Signal generation failed for %s: %s', symbol, e)
+            logger.info('SIGNAL_REJECTED %s | stage=error | %s', symbol, e)
             return None

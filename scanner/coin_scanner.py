@@ -199,6 +199,12 @@ class CoinScanner:
                 + 0.20 * funding_score
             )
 
+            # Prioritise small-account-friendly pairs: boost preferred symbols so
+            # liquid, low-priced futures stay in the watchlist for $20–$100 accounts.
+            boost = getattr(self.settings, 'preferred_symbol_score_boost', 0.0)
+            if boost and self.settings.is_preferred_symbol(c['symbol']):
+                composite = min(1.0, composite + boost)
+
             scores.append(
                 CoinScore(
                     symbol=c['symbol'],

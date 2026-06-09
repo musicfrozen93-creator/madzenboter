@@ -88,11 +88,27 @@ class Settings:
     high_vol_atr_multiplier: float = 1.5
     low_vol_atr_multiplier: float = 0.7
 
+    # ── Entry signal thresholds (configurable; control trade frequency) ──
+    # LONG  enters when RSI < rsi_long_threshold (and the trend filter passes).
+    # SHORT enters when RSI > rsi_short_threshold (and the trend filter passes).
+    # Higher long / lower short = MORE frequent trades. Defaults 40/60 are a
+    # commercial balance between frequency and avoiding random-noise entries.
+    rsi_long_threshold: float = 40.0
+    rsi_short_threshold: float = 60.0
+    # When True (default) the EMA200 higher-timeframe trend filter is mandatory:
+    # only long above EMA200, only short below. Set False to trade on RSI alone
+    # (NOT recommended — removes trend protection for the averaging grid).
+    require_ema_trend_filter: bool = True
+
     # ── Scanner ──
-    max_watchlist_size: int = 20
+    max_watchlist_size: int = 25
     min_volume_24h: float = 50_000_000.0
     max_funding_rate: float = 0.001
     min_coin_age_days: int = 30
+    # Composite-score boost applied to preferred small-account symbols so they
+    # rank into the watchlist (0 = no boost). Keeps liquid, low-priced pairs in
+    # rotation for $20–$100 accounts.
+    preferred_symbol_score_boost: float = 0.15
 
     # ── Recovery System ──
     recovery_max_layers: int = 4
@@ -159,8 +175,10 @@ class Settings:
     small_account_threshold: float = 100.0
     preferred_small_account_symbols: list = field(
         default_factory=lambda: [
-            'DOGE/USDT', 'XRP/USDT', 'TRX/USDT', 'ADA/USDT', 'XLM/USDT',
-            'VET/USDT', 'ALGO/USDT', 'SEI/USDT', 'SUI/USDT',
+            'DOGE/USDT', 'XRP/USDT', 'ADA/USDT', 'TRX/USDT', 'SUI/USDT',
+            'LINK/USDT', 'ATOM/USDT', 'AVAX/USDT', 'ETC/USDT', 'BCH/USDT',
+            'FET/USDT', 'INJ/USDT', 'NEAR/USDT', 'HBAR/USDT', 'ALGO/USDT',
+            'VET/USDT', 'FIL/USDT', 'APT/USDT', 'ARB/USDT', 'OP/USDT',
         ]
     )
 

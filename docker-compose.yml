@@ -33,10 +33,11 @@ services:
         condition: service_healthy
     environment:
       - TZ=UTC
+      # The bot container needs NO exchange API keys. All trading credentials
+      # are loaded per-user from the database and decrypted with the encryption
+      # key below. Only DB creds, the encryption key, and app secrets are passed.
       - DATABASE_URL=postgresql://zengrid:${POSTGRES_PASSWORD:-zengrid_dev_password}@postgres:5432/zengrid
       - MASTER_ENCRYPTION_KEY=${MASTER_ENCRYPTION_KEY}
-      - BINANCE_API_KEY=${BINANCE_API_KEY}
-      - BINANCE_API_SECRET=${BINANCE_API_SECRET}
       - ADMIN_API_KEY=${ADMIN_API_KEY}
       - ADMIN_API_PORT=${ADMIN_API_PORT:-8000}
     ports:

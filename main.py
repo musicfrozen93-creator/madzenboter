@@ -73,6 +73,7 @@ Examples:
         db.initialize()
         db.set_state('emergency_shutdown', 'false')
         db.set_state('emergency_shutdown_reason', '')
+        db.set_state('emergency_shutdown_critical', 'false')
         print('✓ Emergency shutdown cleared. You can restart the bot.')
         db.close()
         return

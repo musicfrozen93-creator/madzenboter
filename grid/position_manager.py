@@ -82,10 +82,6 @@ class PositionManager:
             vol = VolatilityLevel.MEDIUM
 
         leverage = self.settings.get_leverage(vol)
-        base_margin = self.position_sizer.calculate_base_margin(balance, vol)
-
-        # Layer 1 margin
-        margin = base_margin * self.settings.recovery_margin_multipliers[0]
 
         # Get market info for quantity calculation
         try:
@@ -94,20 +90,24 @@ class PositionManager:
             logger.error('Failed to get market info for %s: %s', signal.symbol, e)
             return None
 
-        quantity = self.position_sizer.calculate_quantity(
-            margin, signal.current_price, leverage, market_info
+        # ── Account-size-aware order plan + symbol suitability ──
+        # evaluate_entry accounts for the exchange min-notional / min-lot, so the
+        # margin/notional below reflect the SMALLEST order that would actually
+        # fill — and reject the symbol if that breaches the account hard cap or
+        # sits too close to liquidation.
+        plan = self.position_sizer.evaluate_entry(
+            balance, signal.current_price, leverage, vol, market_info
         )
+        quantity = plan['quantity']
+        margin = plan['margin']
 
-        if quantity <= 0:
-            logger.warning('Calculated quantity is 0 for %s', signal.symbol)
-            return None
-
-        # Validate minimum notional
-        if not validate_min_notional(quantity, signal.current_price, market_info):
-            logger.warning(
-                'Below min notional for %s: qty=%.8f × price=%.4f = %.4f',
-                signal.symbol, quantity, signal.current_price,
-                quantity * signal.current_price,
+        if not plan['suitable']:
+            logger.info(
+                'SYMBOL REJECTED %s | reason=%s | balance=%.2f price=%.4f lev=%dx '
+                '| req_margin=%.2f notional=%.2f liq_dist=%.1f%% hard_cap=%.2f',
+                signal.symbol, plan['reason'], balance, signal.current_price,
+                leverage, margin, plan['notional'],
+                plan['liquidation_distance_pct'] * 100, plan['hard_cap'],
             )
             return None
 
@@ -122,6 +122,14 @@ class PositionManager:
         if not allowed:
             logger.info('Position blocked for %s: %s', signal.symbol, reason)
             return None
+
+        logger.info(
+            'SYMBOL SELECTED %s %s | balance=%.2f lev=%dx | margin=%.2f '
+            'notional=%.2f qty=%.8f liq_dist=%.1f%% hard_cap=%.2f',
+            signal.side.upper(), signal.symbol, balance, leverage, margin,
+            plan['notional'], quantity, plan['liquidation_distance_pct'] * 100,
+            plan['hard_cap'],
+        )
 
         # ── Execute ──
         try:
@@ -347,10 +355,10 @@ class PositionManager:
             pnl_symbol = '+' if realized_pnl >= 0 else ''
             trade_logger.info(
                 'CLOSE %s %s [%s] | entry=%.4f exit=%.4f | '
-                'PnL=%s%.4f USDT | layers=%d margin=%.4f fee=%.4f | basket=%s',
+                'PnL=%s%.4f USDT | lev=%dx layers=%d margin=%.4f fee=%.4f | basket=%s',
                 basket.side.upper(), basket.symbol, reason.upper(),
                 trade.entry_price, current_price,
-                pnl_symbol, realized_pnl, basket.leverage,
+                pnl_symbol, realized_pnl, basket.leverage, trade.layers_used,
                 trade.margin, fee, basket.id[:8],
             )
 
@@ -431,6 +439,22 @@ class PositionManager:
         layer_params = self.recovery.calculate_layer_params(
             basket, layer_number, base_margin, current_price, basket.leverage
         )
+
+        # ── Per-basket hard margin cap ──
+        # The total margin across ALL layers of a single basket may never exceed
+        # the account-size hard cap (balance × margin_hard_cap_pct). This is the
+        # primary guard against recovery layers compounding into excessive
+        # margin on small accounts.
+        hard_cap = self.settings.get_margin_hard_cap(balance)
+        projected_basket_margin = basket.total_margin + layer_params.margin
+        if projected_basket_margin > hard_cap:
+            logger.info(
+                'Recovery L%d blocked for %s: basket margin %.2f + %.2f = %.2f '
+                'would exceed hard cap %.2f (balance=%.2f)',
+                layer_number, basket.symbol, basket.total_margin,
+                layer_params.margin, projected_basket_margin, hard_cap, balance,
+            )
+            return
 
         # Validate with market info
         market_info = self.exchange.get_symbol_info(basket.symbol)

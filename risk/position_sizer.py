@@ -16,13 +16,14 @@ logger = logging.getLogger(__name__)
 class PositionSizer:
     """Calculates position size (margin and quantity) for new entries.
 
-    Tier-based sizing:
-      < 50 USDT:  0.40–0.60 margin, max 3 positions
-      50–100:     0.60–0.80 margin, max 5 positions
-      > 100:      0.90–1.50 margin, max 8 positions
-
-    High volatility uses the lower end of the range (conservative).
-    Low volatility uses the upper end (slightly more aggressive).
+    Account-size-aware, percentage-based sizing (capital preservation first):
+      • First-layer target margin = balance × margin_target_pct_range
+        (HIGH volatility uses the low end, LOW uses the high end).
+      • Every entry is hard-capped at balance × margin_hard_cap_pct so a single
+        basket can never consume more than that fraction of the account.
+      • evaluate_entry() additionally rejects symbols whose smallest valid order
+        (min-notional / min-lot) would breach the hard cap, or whose leverage
+        would place liquidation too close.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -31,10 +32,10 @@ class PositionSizer:
     def calculate_base_margin(
         self, balance: float, volatility: VolatilityLevel
     ) -> float:
-        """Calculate base margin for a new position.
+        """Calculate base (first-layer) margin for a new position.
 
-        Scales linearly within the tier's margin range, adjusted
-        by volatility to be more conservative in volatile markets.
+        Percentage of balance, adjusted by volatility, clamped to the dust
+        floor and the per-basket hard cap.
 
         Args:
             balance: Current account balance in USDT.
@@ -43,52 +44,140 @@ class PositionSizer:
         Returns:
             Base margin amount in USDT.
         """
-        min_margin, max_margin = self.settings.get_base_margin_range(balance)
-        tier = self.settings.get_tier(balance)
+        lo, hi = self.settings.get_target_margin_range(balance)
 
-        # Position within the tier (0.0 = bottom, 1.0 = top)
-        tier_list = self.settings.position_margin_tiers
-        tier_idx = tier_list.index(tier) if tier in tier_list else 0
-
-        if tier_idx == 0:
-            # First tier: scale from 30 to max_balance
-            tier_bottom = 0.0
-        else:
-            tier_bottom = tier_list[tier_idx - 1]['max_balance']
-
-        tier_top = tier['max_balance']
-        if tier_top == float('inf'):
-            # For the unbounded tier, scale up to 5× the bottom
-            tier_top = max(tier_bottom * 5, 500)
-
-        if tier_top > tier_bottom:
-            tier_position = min(
-                1.0, (balance - tier_bottom) / (tier_top - tier_bottom)
-            )
-        else:
-            tier_position = 0.5
-
-        # Base margin interpolated within range
-        base = min_margin + (max_margin - min_margin) * tier_position
-
-        # Volatility adjustment
+        # Volatility selects within the range: HIGH = conservative (low end),
+        # LOW = slightly more aggressive (high end), MEDIUM = midpoint.
         if volatility == VolatilityLevel.HIGH:
-            base = min_margin + (base - min_margin) * 0.3  # conservative
+            base = lo
         elif volatility == VolatilityLevel.LOW:
-            base = base + (max_margin - base) * 0.3  # slightly more aggressive
+            base = hi
+        else:
+            base = (lo + hi) / 2.0
 
-        # Absolute minimum: 0.30 USDT (below this Binance will reject)
-        base = max(0.30, base)
-
-        # Never use more than 5% of balance on a single layer-1 entry
-        max_single = balance * 0.05
-        base = min(base, max_single) if max_single > 0.30 else base
+        # Dust floor and absolute per-basket hard cap.
+        base = max(self.settings.min_margin_floor, base)
+        base = min(base, self.settings.get_margin_hard_cap(balance))
 
         logger.debug(
-            'Position size: balance=%.2f vol=%s → margin=%.4f (range=%.2f–%.2f)',
-            balance, volatility.value, base, min_margin, max_margin,
+            'Position size: balance=%.2f vol=%s → margin=%.4f '
+            '(target=%.2f–%.2f hard_cap=%.2f)',
+            balance, volatility.value, base, lo, hi,
+            self.settings.get_margin_hard_cap(balance),
         )
         return round(base, 4)
+
+    def estimate_liquidation_distance_pct(self, leverage: int) -> float:
+        """Estimate price distance (fraction) from entry to liquidation.
+
+        Approximation for cross/isolated futures: 1/leverage minus the
+        maintenance-margin rate. Higher leverage → liquidation is closer.
+
+        Args:
+            leverage: Leverage multiplier.
+
+        Returns:
+            Estimated liquidation distance as a fraction of entry price.
+        """
+        if leverage <= 0:
+            return 0.0
+        return max(0.0, (1.0 / leverage) - self.settings.maintenance_margin_rate)
+
+    def evaluate_entry(
+        self,
+        balance: float,
+        price: float,
+        leverage: int,
+        volatility: VolatilityLevel,
+        market_info: dict,
+    ) -> dict:
+        """Build a realistic order plan and judge its suitability for the account.
+
+        Accounts for the exchange's min-notional and min-lot constraints, so the
+        returned margin/notional reflect the SMALLEST order that would actually
+        fill — not just the ideal target. Rejects the symbol when that smallest
+        order would breach the account-size hard cap or sit too close to
+        liquidation.
+
+        Returns a dict:
+            quantity, margin, notional, liquidation_distance_pct, leverage,
+            base_margin, hard_cap, suitable (bool), reason (str).
+        """
+        base_margin = self.calculate_base_margin(balance, volatility)
+        hard_cap = self.settings.get_margin_hard_cap(balance)
+
+        result = {
+            'quantity': 0.0, 'margin': 0.0, 'notional': 0.0,
+            'liquidation_distance_pct': 0.0, 'leverage': leverage,
+            'base_margin': base_margin, 'hard_cap': hard_cap,
+            'suitable': False, 'reason': 'unknown',
+        }
+
+        if price <= 0 or leverage <= 0:
+            result['reason'] = 'invalid price/leverage'
+            return result
+
+        limits = market_info.get('limits', {})
+        min_notional = limits.get('cost', {}).get('min') or 5.0
+        min_qty = limits.get('amount', {}).get('min') or 0.0
+
+        # Ideal quantity for the target margin, floored to the lot step.
+        target_notional = base_margin * leverage
+        target_qty = round_quantity(target_notional / price, market_info)
+
+        # Smallest quantity that satisfies BOTH min-notional and min-lot.
+        min_qty_for_notional = min_notional / price
+        required_qty = max(target_qty, min_qty, min_qty_for_notional)
+        required_qty = round_quantity(required_qty, market_info)
+
+        # Flooring can drop a sub-step quantity to zero, or just under
+        # min-notional — nudge up by one lot step in that case.
+        if required_qty <= 0 or required_qty * price < min_notional:
+            step = self._lot_step(market_info)
+            required_qty = round_quantity(required_qty + step, market_info)
+
+        notional = required_qty * price
+        margin = notional / leverage
+        liq_dist = self.estimate_liquidation_distance_pct(leverage)
+
+        result.update({
+            'quantity': required_qty,
+            'margin': round(margin, 4),
+            'notional': round(notional, 4),
+            'liquidation_distance_pct': round(liq_dist, 4),
+        })
+
+        # ── Suitability gates ──
+        if required_qty <= 0:
+            result['reason'] = 'quantity rounds to zero'
+        elif notional < min_notional * 0.999:
+            result['reason'] = f'below min notional ({notional:.2f} < {min_notional:.2f})'
+        elif margin > hard_cap:
+            result['reason'] = (
+                f'required margin {margin:.2f} exceeds account hard cap '
+                f'{hard_cap:.2f} (balance={balance:.2f})'
+            )
+        elif liq_dist < self.settings.min_liquidation_distance_pct:
+            result['reason'] = (
+                f'liquidation distance {liq_dist:.1%} < minimum '
+                f'{self.settings.min_liquidation_distance_pct:.1%} at {leverage}x'
+            )
+        else:
+            result['suitable'] = True
+            result['reason'] = 'OK'
+
+        return result
+
+    @staticmethod
+    def _lot_step(market_info: dict) -> float:
+        """Return the lot step size, defaulting to a tiny step when unknown."""
+        precision = market_info.get('precision', {}).get('amount', 8)
+        if isinstance(precision, float) and precision > 0:
+            return precision
+        try:
+            return 10 ** (-int(precision))
+        except (TypeError, ValueError):
+            return 1e-8
 
     def calculate_quantity(
         self, margin: float, price: float, leverage: int, market_info: dict

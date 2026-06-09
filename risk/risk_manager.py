@@ -88,24 +88,38 @@ class RiskManager:
         Returns:
             Tuple of (allowed: bool, reason: str).
         """
-        # 1. Emergency shutdown
+        # 1. Emergency shutdown (only CRITICAL shutdowns block here; routine
+        #    daily drawdown never sets this flag).
         if self.is_emergency_shutdown():
-            return False, 'Emergency shutdown active — manual restart required'
+            return False, 'Emergency shutdown active — critical failure, manual review required'
 
-        # 2. Daily loss limit
+        # 2. Daily drawdown limit (account-size aware; pauses until next UTC day)
         if self.check_daily_loss_limit(current_balance):
-            return False, 'Daily loss limit (5%) reached'
+            limit = self.settings.get_daily_drawdown_limit(current_balance)
+            dd = self.get_daily_drawdown_pct(current_balance)
+            return False, f'Daily drawdown limit reached ({dd:.1%} >= {limit:.0%})'
 
-        # 3. Drawdown limit
+        # 3. Catastrophic drawdown from high-water mark (critical backstop)
         if self.check_drawdown_limit(current_balance):
-            return False, 'Max drawdown limit (15%) reached'
+            return False, (
+                f'Catastrophic drawdown limit reached '
+                f'({self.settings.catastrophic_drawdown_pct:.0%} from peak)'
+            )
 
         # 4. Max positions
         max_pos = self.settings.get_max_positions(current_balance)
         if active_positions >= max_pos:
             return False, f'Max positions reached ({active_positions}/{max_pos})'
 
-        # 5. Exposure limit
+        # 5. Per-basket hard margin cap (account-size aware)
+        hard_cap = self.settings.get_margin_hard_cap(current_balance)
+        if margin > hard_cap:
+            return False, (
+                f'Margin {margin:.2f} exceeds per-trade hard cap {hard_cap:.2f} '
+                f'({self.settings.margin_hard_cap_pct:.0%} of {current_balance:.2f})'
+            )
+
+        # 6. Exposure limit
         if current_balance > 0:
             new_exposure_pct = (current_exposure + margin) / current_balance
             if new_exposure_pct > self.settings.max_exposure_pct:
@@ -115,7 +129,7 @@ class RiskManager:
                     f'({new_exposure_pct:.1%} > {self.settings.max_exposure_pct:.0%})',
                 )
 
-        # 6. Sufficient balance
+        # 7. Sufficient balance
         if margin > current_balance * 0.5:
             return False, 'Margin too large relative to balance'
 
@@ -124,41 +138,62 @@ class RiskManager:
 
         return True, 'OK'
 
-    def check_daily_loss_limit(self, current_balance: float) -> bool:
-        """Check if daily loss limit has been hit.
+    def get_daily_drawdown_pct(self, current_balance: float) -> float:
+        """Current daily drawdown as a positive fraction (0.0 if in profit)."""
+        if self._daily_start_balance <= 0:
+            return 0.0
+        change = (current_balance - self._daily_start_balance) / self._daily_start_balance
+        return max(0.0, -change)
 
-        Resets at midnight UTC.
+    def check_daily_loss_limit(self, current_balance: float) -> bool:
+        """Check if the account-size-aware daily drawdown limit has been hit.
+
+        Limit is 15% (<= $50), 10% ($50–200), or 5% (> $200). Routine and
+        auto-resets at midnight UTC — does NOT cause a permanent shutdown.
 
         Args:
             current_balance: Current account balance.
 
         Returns:
-            True if the 5% daily loss limit is breached.
+            True if the daily drawdown limit is breached.
         """
         self._check_daily_reset(current_balance)
 
         if self._daily_start_balance <= 0:
             return False
 
+        limit = self.settings.get_daily_drawdown_limit(current_balance)
         daily_pnl_pct = (
             (current_balance - self._daily_start_balance) / self._daily_start_balance
         )
-        return daily_pnl_pct <= -self.settings.daily_loss_limit_pct
+        breached = daily_pnl_pct <= -limit
+        if breached:
+            logger.warning(
+                'Daily drawdown limit breached: drawdown=%.2f%% limit=%.0f%% '
+                'start=%.2f current=%.2f',
+                self.get_daily_drawdown_pct(current_balance) * 100, limit * 100,
+                self._daily_start_balance, current_balance,
+            )
+        return breached
 
     def check_drawdown_limit(self, current_balance: float) -> bool:
-        """Check if max drawdown from high-water mark is breached.
+        """Check if CATASTROPHIC drawdown from the high-water mark is breached.
+
+        This is the critical backstop (default 50%): a drop this large from the
+        all-time peak signals a genuine failure, not routine market noise, and is
+        the ONLY drawdown condition that triggers a permanent emergency shutdown.
 
         Args:
             current_balance: Current account balance.
 
         Returns:
-            True if the 15% drawdown limit is breached.
+            True if the catastrophic drawdown limit is breached.
         """
         if self._high_water_mark <= 0:
             return False
 
         drawdown = (self._high_water_mark - current_balance) / self._high_water_mark
-        return drawdown >= self.settings.max_drawdown_pct
+        return drawdown >= self.settings.catastrophic_drawdown_pct
 
     def update_high_water_mark(self, balance: float) -> None:
         """Update HWM if balance is a new peak.
@@ -191,26 +226,69 @@ class RiskManager:
         """Check if emergency shutdown flag is active."""
         return self.database.get_state('emergency_shutdown') == 'true'
 
-    def trigger_emergency_shutdown(self, reason: str) -> None:
-        """Activate emergency shutdown — requires manual restart.
+    def is_critical_shutdown(self) -> bool:
+        """True only if the active shutdown was flagged CRITICAL.
+
+        Critical shutdowns (genuine system/logic failures or catastrophic
+        drawdown) require manual review. Non-critical / legacy shutdowns are
+        eligible for automatic recovery.
+        """
+        if not self.is_emergency_shutdown():
+            return False
+        return self.database.get_state('emergency_shutdown_critical') == 'true'
+
+    def trigger_emergency_shutdown(self, reason: str, critical: bool = False) -> None:
+        """Activate emergency shutdown.
 
         Args:
             reason: Human-readable reason for the shutdown.
+            critical: If True, requires manual review (permanent until cleared).
+                If False, it is a routine pause eligible for daily auto-recovery.
         """
         self.database.set_state('emergency_shutdown', 'true')
         self.database.set_state('emergency_shutdown_reason', reason)
+        self.database.set_state('emergency_shutdown_critical', 'true' if critical else 'false')
         self.database.set_state('emergency_shutdown_time', str(time.time()))
-        logger.critical(
-            '🚨 EMERGENCY SHUTDOWN TRIGGERED: %s — '
-            'Trading disabled. Run with --clear-shutdown to resume.',
-            reason,
-        )
+        if critical:
+            logger.critical(
+                '🚨 CRITICAL EMERGENCY SHUTDOWN: %s — Trading disabled. '
+                'Manual review required (run with --clear-shutdown to resume).',
+                reason,
+            )
+        else:
+            logger.warning(
+                '⏸️ Trading paused (non-critical): %s — '
+                'will auto-recover on the next UTC day.', reason,
+            )
 
     def clear_emergency_shutdown(self) -> None:
         """Clear the emergency shutdown flag."""
         self.database.set_state('emergency_shutdown', 'false')
         self.database.set_state('emergency_shutdown_reason', '')
+        self.database.set_state('emergency_shutdown_critical', 'false')
         logger.info('Emergency shutdown cleared')
+
+    def auto_recover_if_eligible(self) -> bool:
+        """Auto-clear a NON-critical emergency shutdown so trading can resume.
+
+        Critical shutdowns are left untouched (manual review only). Used on
+        startup and at the start of each new UTC day so routine daily-drawdown
+        pauses never require manual intervention.
+
+        Returns:
+            True if a shutdown was cleared, False otherwise.
+        """
+        if not self.is_emergency_shutdown():
+            return False
+        if self.is_critical_shutdown():
+            return False
+        reason = self.database.get_state('emergency_shutdown_reason') or 'unknown'
+        logger.info(
+            'Auto-recovering from non-critical shutdown (reason: %s) — '
+            'resuming trading.', reason,
+        )
+        self.clear_emergency_shutdown()
+        return True
 
     # ───────────────────────────────────────────
     # Internal Helpers

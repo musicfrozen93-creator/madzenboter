@@ -119,10 +119,36 @@ class SignalExecutor:
         signal_id = self.db.save_signal(signal)
         logger.info('Saved signal %s %s with ID %s', signal.side.upper(), signal.symbol, signal_id)
 
-        # Get all active accounts
-        active_accounts = self.account_manager.get_active_accounts()
+        # ── Eligibility gate (subscription enforcement) ──
+        # The database is the source of truth. Each account is evaluated
+        # independently; ineligible ones (suspended user, expired/missing
+        # subscription, disabled account) are skipped and logged, never traded.
+        eligibility = self.db.get_account_eligibility()
+        active_accounts = [acct for (acct, ok, _reason) in eligibility if ok]
+
+        for acct, ok, reason in eligibility:
+            if ok:
+                continue
+            logger.info(
+                'Skipping account %s (%s) for %s %s: %s',
+                acct.id, acct.label, signal.side.upper(), signal.symbol, reason,
+                extra={'account_id': acct.id},
+            )
+            try:
+                self.db.save_execution_log(
+                    account_id=acct.id, action='open', symbol=signal.symbol,
+                    status='skipped', signal_id=signal_id, side=signal.side,
+                    error_message=f'ineligible: {reason}',
+                )
+            except Exception as db_exc:
+                logger.debug('Failed to log skip for account %s: %s', acct.id, db_exc)
+
         if not active_accounts:
-            logger.warning('No active accounts configured for signal execution')
+            logger.warning(
+                'No eligible accounts (active user + active subscription + enabled '
+                'account) for signal %s %s — not trading.',
+                signal.side.upper(), signal.symbol,
+            )
             return []
 
         results: List[ExecutionResult] = []
@@ -197,9 +223,12 @@ class SignalExecutor:
             basket = position_manager.open_position(signal, balance)
 
             if basket:
-                # Save the association to account
+                # NOTE: open_position() already persisted the basket and its
+                # layers through the account-isolated DB wrapper (which stamps
+                # account_id). Do NOT save again here — Database.save_basket
+                # INSERTs layers, so a second save duplicates every layer and
+                # doubles the tracked quantity/margin/PnL.
                 basket.account_id = account.id
-                self.db.save_basket(basket)
 
                 fill_price = basket.layers[-1].entry_price if basket.layers else signal.current_price
                 qty = basket.layers[-1].quantity if basket.layers else 0.0

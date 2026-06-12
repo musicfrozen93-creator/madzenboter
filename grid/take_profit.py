@@ -6,7 +6,7 @@ and partial close logic for controlled profit taking.
 """
 
 import logging
-from typing import List
+from typing import List, Optional
 
 from config.settings import Settings, VolatilityLevel
 from core.dto import Basket, RecoveryLayer
@@ -26,7 +26,12 @@ class TakeProfitManager:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    def check_basket_tp(self, basket: Basket, current_price: float) -> bool:
+    def check_basket_tp(
+        self,
+        basket: Basket,
+        current_price: float,
+        tp_roi_multiplier: float = 1.0,
+    ) -> bool:
         """Check if the basket has reached its take-profit ROI target.
 
         The target ROI varies by volatility:
@@ -37,6 +42,8 @@ class TakeProfitManager:
         Args:
             basket: The active basket.
             current_price: Current market price.
+            tp_roi_multiplier: V2 template multiplier on the target
+                (SCOUT/RANGE take quicker profits; 1.0 = legacy behaviour).
 
         Returns:
             True if basket TP target is reached.
@@ -53,7 +60,7 @@ class TakeProfitManager:
         except ValueError:
             vol = VolatilityLevel.MEDIUM
 
-        target_roi = self.settings.get_basket_tp_roi(vol)
+        target_roi = self.settings.get_basket_tp_roi(vol) * max(0.1, tp_roi_multiplier)
 
         if roi >= target_roi:
             logger.info(
@@ -65,6 +72,70 @@ class TakeProfitManager:
             )
             return True
         return False
+
+    def check_trailing_tp(
+        self,
+        basket: Basket,
+        current_price: float,
+        tp_roi_multiplier: float = 1.0,
+    ) -> Optional[str]:
+        """V2 trailing take-profit: never exits worse than the fixed target,
+        ratchets the exit upward as ROI extends beyond it.
+
+        Arms once ROI reaches the (template-scaled) target. While armed,
+        tracks the peak ROI; exits when ROI gives back
+        ``trailing_giveback_pct`` of the gain beyond the target (the floor
+        never falls below the target itself).
+
+        Args:
+            basket: The active basket (peak_roi runtime field is updated).
+            current_price: Current market price.
+            tp_roi_multiplier: Template multiplier on the volatility target.
+
+        Returns:
+            'basket_tp' / 'basket_tp_trail' when the exit fires, else None.
+        """
+        total_margin = basket.total_margin
+        if total_margin <= 0:
+            return None
+
+        try:
+            vol = VolatilityLevel(basket.volatility)
+        except ValueError:
+            vol = VolatilityLevel.MEDIUM
+
+        target = self.settings.get_basket_tp_roi(vol) * max(0.1, tp_roi_multiplier)
+        roi = basket.unrealized_pnl(current_price) / total_margin
+
+        # Arm trailing the first time ROI reaches the target.
+        if basket.peak_roi <= 0.0:
+            if roi >= target:
+                basket.peak_roi = roi
+                logger.info(
+                    'TRAILING ARMED: %s %s | ROI=%.2f%% target=%.2f%%',
+                    basket.side.upper(), basket.symbol, roi * 100, target * 100,
+                )
+            return None
+
+        # Armed — ratchet the peak and compute the giveback floor.
+        basket.peak_roi = max(basket.peak_roi, roi)
+        gain_beyond = max(0.0, basket.peak_roi - target)
+        floor = max(
+            target,
+            basket.peak_roi - self.settings.trailing_giveback_pct
+            * max(gain_beyond, 1e-9),
+        )
+
+        if roi < floor:
+            reason = 'basket_tp_trail' if gain_beyond > 0 else 'basket_tp'
+            logger.info(
+                'TRAILING EXIT: %s %s | ROI=%.2f%% peak=%.2f%% floor=%.2f%% '
+                'target=%.2f%%',
+                basket.side.upper(), basket.symbol, roi * 100,
+                basket.peak_roi * 100, floor * 100, target * 100,
+            )
+            return reason
+        return None
 
     def check_individual_tp(
         self, layer: RecoveryLayer, current_price: float, atr: float, side: str

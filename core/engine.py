@@ -25,6 +25,8 @@ from config.settings import Settings
 from core.database import Database
 from core.dto import CoinScore
 from exchange.client import ExchangeClient
+from market.market_state import MarketStateEngine
+from market.symbol_state import SymbolStateEngine
 from scanner.coin_scanner import CoinScanner
 from signals.signal_engine import SignalEngine
 
@@ -94,7 +96,20 @@ class TradingEngine:
 
         # Scanner & Signals (read-only market data)
         self.scanner = CoinScanner(self.exchange_client, settings, self.database)
-        self.signal_engine = SignalEngine(self.exchange_client, settings)
+
+        # V2: shared market context engines (public market data only).
+        # The SymbolStateEngine classifies hysteresis trend states for every
+        # watchlist symbol; the MarketStateEngine maintains the BTC factor
+        # state, breadth, and volatility regime. Both are computed ONCE and
+        # shared by every account.
+        self.symbol_state_engine = SymbolStateEngine(settings)
+        self.market_state_engine = MarketStateEngine(self.exchange_client, settings)
+
+        self.signal_engine = SignalEngine(
+            self.exchange_client, settings,
+            symbol_state_engine=self.symbol_state_engine,
+            market_state_engine=self.market_state_engine,
+        )
 
         # NOTE: There is intentionally NO engine-level (global) RiskManager or
         # PositionManager. All risk state, position sizing, and shutdown state
@@ -141,6 +156,7 @@ class TradingEngine:
                 account_manager=self._account_manager,
                 encryption=self._encryption,
                 master_settings=self.settings,
+                symbol_state_engine=self.symbol_state_engine,
             )
             self._sync_service = SyncService(
                 db=self.database,
@@ -344,22 +360,34 @@ class TradingEngine:
                     except Exception as e:
                         logger.error('Scan failed: %s', e)
 
-                # 2. If account trading is disabled, scan only — never trade.
+                # 2. Refresh the shared V2 market state (BTC factor state,
+                #    breadth, volatility regime). Internally rate-limited to
+                #    market_state_refresh_seconds; breadth comes from the
+                #    symbol states classified during signal evaluation.
+                market_state = None
+                try:
+                    market_state = self.market_state_engine.update(
+                        self.symbol_state_engine.snapshot_states()
+                    )
+                except Exception as e:
+                    logger.error('Market state update failed: %s', e)
+
+                # 3. If account trading is disabled, scan only — never trade.
                 if not (self._account_trading_enabled and self._signal_executor):
                     self._log_status()
                     elapsed = time.time() - loop_start
                     time.sleep(max(1.0, self.settings.loop_interval_seconds - elapsed))
                     continue
 
-                # 3. Manage existing positions for EVERY active account.
+                # 4. Manage existing positions for EVERY active account.
                 #    Each account is handled in isolation inside the executor;
                 #    one account's failure never affects the others.
                 try:
-                    self._signal_executor.manage_all_accounts()
+                    self._signal_executor.manage_all_accounts(market_state)
                 except Exception as e:
                     logger.error('Per-account basket management error: %s', e)
 
-                # 4. Generate signals from the shared watchlist and fan each out.
+                # 5. Generate signals from the shared watchlist and fan each out.
                 #    Per-account eligibility (subscription) and per-account risk
                 #    limits decide independently whether each account takes it.
                 if not self._watchlist:
@@ -376,7 +404,10 @@ class TradingEngine:
                         if not sig:
                             continue  # signal_engine logs SIGNAL_REJECTED with the reason
                         found += 1
-                        results = self._signal_executor.execute_signal(sig)
+                        # V2: stamp the watchlist tier — rotation-tier symbols
+                        # are capped below the CORE template by the router.
+                        sig.symbol_tier = getattr(coin, 'tier', 'core') or 'core'
+                        results = self._signal_executor.execute_signal(sig, market_state)
                         if results:
                             success_count = sum(1 for r in results if r.success)
                             logger.info(
@@ -394,7 +425,7 @@ class TradingEngine:
                         len(self._watchlist), evaluated, found, evaluated - found,
                     )
 
-                # 5. Log periodic status
+                # 6. Log periodic status
                 self._log_status()
 
             except Exception as e:

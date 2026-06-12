@@ -128,6 +128,12 @@ class Database:
                 leverage=basket.leverage,
                 status=basket.status,
                 created_at=basket.created_at,
+                template=getattr(basket, 'template', 'core') or 'core',
+                risk_budget=getattr(basket, 'risk_budget', 0.0) or 0.0,
+                wind_down=bool(getattr(basket, 'wind_down', False)),
+                wind_down_at=getattr(basket, 'wind_down_at', None),
+                peak_roi=getattr(basket, 'peak_roi', 0.0) or 0.0,
+                be_armed=bool(getattr(basket, 'be_armed', False)),
             )
             session.merge(basket_orm)
             for layer in basket.layers:
@@ -154,6 +160,12 @@ class Database:
             if basket_orm:
                 basket_orm.status = basket.status
                 basket_orm.leverage = basket.leverage
+                basket_orm.template = getattr(basket, 'template', 'core') or 'core'
+                basket_orm.risk_budget = getattr(basket, 'risk_budget', 0.0) or 0.0
+                basket_orm.wind_down = bool(getattr(basket, 'wind_down', False))
+                basket_orm.wind_down_at = getattr(basket, 'wind_down_at', None)
+                basket_orm.peak_roi = getattr(basket, 'peak_roi', 0.0) or 0.0
+                basket_orm.be_armed = bool(getattr(basket, 'be_armed', False))
 
             # Delete existing layers and re-insert
             session.query(RecoveryLayerModel).filter(
@@ -199,6 +211,12 @@ class Database:
                     status=row.status,
                     leverage=row.leverage,
                     account_id=row.account_id,
+                    template=getattr(row, 'template', 'core') or 'core',
+                    risk_budget=getattr(row, 'risk_budget', 0.0) or 0.0,
+                    wind_down=bool(getattr(row, 'wind_down', False)),
+                    wind_down_at=getattr(row, 'wind_down_at', None),
+                    peak_roi=getattr(row, 'peak_roi', 0.0) or 0.0,
+                    be_armed=bool(getattr(row, 'be_armed', False)),
                 )
                 # Load layers
                 layers = (
@@ -328,6 +346,7 @@ class Database:
                     funding_score=s.funding_score,
                     composite_score=s.composite_score,
                     updated_at=now,
+                    tier=getattr(s, 'tier', 'core') or 'core',
                 )
                 session.add(wl)
 
@@ -354,6 +373,7 @@ class Database:
                     funding_rate=r.funding_rate or 0.0,
                     funding_score=r.funding_score or 0.0,
                     composite_score=r.composite_score or 0.0,
+                    tier=getattr(r, 'tier', 'core') or 'core',
                 )
                 for r in rows
             ]
@@ -463,6 +483,10 @@ class Database:
                 current_price=signal.current_price,
                 ema200=signal.ema200,
                 rsi=signal.rsi,
+                symbol_state=getattr(signal, 'symbol_state', None),
+                btc_state=getattr(signal, 'btc_state', None),
+                relative_strength=getattr(signal, 'relative_strength', None),
+                alignment_score=getattr(signal, 'alignment_score', None),
             )
             session.add(sig)
             session.flush()

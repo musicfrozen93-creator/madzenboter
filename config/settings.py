@@ -204,6 +204,157 @@ class Settings:
     # ── Logging ──
     log_level: str = 'INFO'
 
+    # ═════════════════════════════════════════
+    # V2 — Market State Engine
+    # ═════════════════════════════════════════
+    btc_symbol: str = 'BTC/USDT'
+    factor_timeframe: str = '4h'
+    factor_ema_fast: int = 50
+    factor_ema_slow: int = 200
+    factor_adx_impulse_threshold: float = 25.0
+    # A new BTC factor state must repeat on this many consecutive refreshes
+    # before it replaces the current state (closed-candle hysteresis).
+    factor_state_confirmations: int = 2
+    market_state_refresh_seconds: int = 60
+    vol_expansion_ratio: float = 1.4
+    vol_compression_ratio: float = 0.75
+
+    # ── V2 — Symbol State Engine ──
+    # NEUTRAL band half-width = hysteresis_atr_mult × ATR(1h) around EMA200.
+    hysteresis_atr_mult: float = 0.5
+    # Minimum EMA slope (fraction over ~24 closed 1h bars) for STRONG states.
+    strong_slope_pct: float = 0.01
+    # Cached symbol states older than this are re-classified on demand.
+    symbol_state_ttl_seconds: int = 900
+    # Relative-strength lookback (closed 1h bars vs BTC).
+    rs_lookback_bars: int = 24
+
+    # ── V2 — Signal debouncing ──
+    # A raw signal must be observed on this many consecutive evaluations
+    # (within the window) before it is emitted — kills intra-candle phantom
+    # signals that never exist on a closed chart.
+    signal_confirmations: int = 2
+    signal_confirmation_window_seconds: int = 90
+
+    # ── V2 — Trade Templates ──
+    # Every signal trades; the template decides size, ladder rights, and
+    # patience. CORE = aligned with symbol + factor state; SCOUT =
+    # counter-factor or demoted; RANGE = neutral-band / range-factor.
+    template_policies: dict = field(default_factory=lambda: {
+        'core': {
+            'size_multiplier': 1.0, 'max_layers': 4,
+            'risk_budget_pct': 0.012, 'tp_roi_multiplier': 1.0,
+            'trailing_enabled': True, 'max_hold_hours': 72,
+            'spacing_multiplier': 1.0,
+        },
+        'scout': {
+            'size_multiplier': 0.5, 'max_layers': 2,
+            'risk_budget_pct': 0.005, 'tp_roi_multiplier': 0.6,
+            'trailing_enabled': False, 'max_hold_hours': 24,
+            'spacing_multiplier': 1.5,
+        },
+        'range': {
+            'size_multiplier': 0.6, 'max_layers': 2,
+            'risk_budget_pct': 0.0075, 'tp_roi_multiplier': 0.6,
+            'trailing_enabled': False, 'max_hold_hours': 36,
+            'spacing_multiplier': 1.0,
+        },
+    })
+
+    # ── V2 — Portfolio Manager ──
+    # Total notional (margin × leverage) cap as a multiple of balance.
+    max_total_notional_mult: float = 2.5
+    # Notional cap for positions opposing the BTC factor direction.
+    counter_factor_notional_cap_mult: float = 0.5
+    # Max CORE-template baskets per correlation cluster per direction.
+    max_core_per_cluster_direction: int = 2
+    # Rolling event risk budget: realized losses + open basket risk budgets
+    # within the window may not exceed this fraction of balance.
+    event_risk_budget_pct: float = 0.06
+    event_window_hours: int = 48
+    # Correlation clusters by base asset (unlisted bases → 'alt' catch-all).
+    # H4: the cluster cap (max_core_per_cluster_direction) is only as
+    # granular as this map — with just BTC/ETH mapped, the whole alt market
+    # collapsed into one cluster and the cap throttled the entire book.
+    # Bases are matched as symbol.split('/')[0].upper(), so Binance
+    # 1000-prefixed contracts appear as e.g. '1000PEPE'.
+    symbol_clusters: dict = field(default_factory=lambda: {
+        # Majors
+        'BTC': 'major', 'ETH': 'major',
+        # Layer-1 platforms
+        'SOL': 'l1', 'BNB': 'l1', 'ADA': 'l1', 'AVAX': 'l1', 'DOT': 'l1',
+        'ATOM': 'l1', 'NEAR': 'l1', 'APT': 'l1', 'SUI': 'l1', 'TON': 'l1',
+        'TRX': 'l1', 'ALGO': 'l1', 'ICP': 'l1', 'SEI': 'l1', 'EGLD': 'l1',
+        'HBAR': 'l1', 'VET': 'l1', 'FTM': 'l1', 'INJ': 'l1', 'TIA': 'l1',
+        'KAS': 'l1',
+        # Layer-2 / scaling
+        'ARB': 'l2', 'OP': 'l2', 'MATIC': 'l2', 'POL': 'l2', 'STRK': 'l2',
+        'IMX': 'l2', 'MNT': 'l2', 'METIS': 'l2', 'MANTA': 'l2', 'ZK': 'l2',
+        # Memes
+        'DOGE': 'meme', 'SHIB': 'meme', '1000SHIB': 'meme', 'PEPE': 'meme',
+        '1000PEPE': 'meme', 'WIF': 'meme', 'BONK': 'meme', '1000BONK': 'meme',
+        'FLOKI': 'meme', '1000FLOKI': 'meme', 'MEME': 'meme', 'BOME': 'meme',
+        'NOT': 'meme', 'PENGU': 'meme', 'TRUMP': 'meme',
+        # DeFi
+        'UNI': 'defi', 'AAVE': 'defi', 'MKR': 'defi', 'CRV': 'defi',
+        'COMP': 'defi', 'SNX': 'defi', 'SUSHI': 'defi', 'LDO': 'defi',
+        'PENDLE': 'defi', 'DYDX': 'defi', 'JUP': 'defi', 'RUNE': 'defi',
+        'CAKE': 'defi', 'GMX': 'defi',
+        # Oracles / infrastructure / storage
+        'LINK': 'infra', 'GRT': 'infra', 'FIL': 'infra', 'AR': 'infra',
+        'THETA': 'infra', 'PYTH': 'infra', 'API3': 'infra', 'BAND': 'infra',
+        # AI
+        'FET': 'ai', 'RNDR': 'ai', 'RENDER': 'ai', 'AGIX': 'ai',
+        'OCEAN': 'ai', 'TAO': 'ai', 'ARKM': 'ai', 'WLD': 'ai',
+        'VIRTUAL': 'ai', 'AI16Z': 'ai',
+        # Payments / legacy proof-of-work
+        'XRP': 'payments', 'LTC': 'payments', 'BCH': 'payments',
+        'XLM': 'payments', 'ETC': 'payments', 'ZEC': 'payments',
+        'DASH': 'payments', 'EOS': 'payments', 'XMR': 'payments',
+        # Gaming / metaverse
+        'SAND': 'gaming', 'MANA': 'gaming', 'AXS': 'gaming',
+        'GALA': 'gaming', 'APE': 'gaming', 'ENJ': 'gaming',
+    })
+
+    # ── V2 — Direction-aware post-loss response ──
+    # After this many consecutive losses on one side (within the window),
+    # that side trades SCOUT-only for the demotion duration or until a win.
+    direction_demotion_losses: int = 3
+    direction_demotion_window_hours: float = 12.0
+    direction_demotion_duration_hours: float = 12.0
+
+    # ── V2 — Exits ──
+    # Trailing beyond the basket TP target: exit when ROI gives back this
+    # fraction of the gain beyond the target (floor = the target itself).
+    trailing_giveback_pct: float = 0.30
+    # Break-even ratchet: arm once a ≥2-layer basket recovers to this ROI;
+    # exit if ROI falls back to the floor (locks the recovery).
+    be_ratchet_arm_roi: float = 0.02
+    be_ratchet_floor_roi: float = 0.005
+    # Wind-down (premise invalidated): exit at break-even-or-better, or at
+    # market after the time budget expires.
+    wind_down_max_hours: float = 12.0
+    wind_down_be_epsilon_roi: float = 0.0
+    # Time triage: close near-flat baskets older than the template's
+    # max_hold_hours when |ROI| is inside this band (recycles the slot).
+    time_triage_roi_band: float = 0.02
+
+    # ── V2 — Account Profiles ──
+    micro_account_max_balance: float = 75.0
+    compact_account_max_balance: float = 250.0
+    profile_policies: dict = field(default_factory=lambda: {
+        'full': {'max_layers': 4, 'spacing_multiplier': 1.0},
+        'compact': {'max_layers': 3, 'spacing_multiplier': 1.25},
+        'micro': {'max_layers': 2, 'spacing_multiplier': 1.6},
+    })
+
+    # ── V2 — Watchlist tiers ──
+    # Ranks 1..core → 'core', next secondary → 'secondary', next rotation →
+    # 'rotation' (rotation symbols are capped below the CORE template).
+    watchlist_tier_sizes: dict = field(default_factory=lambda: {
+        'core': 20, 'secondary': 15, 'rotation': 15,
+    })
+
     # ─────────────────────────────────────────
     # Class Methods
     # ─────────────────────────────────────────
@@ -439,6 +590,27 @@ class Settings:
         """
         return self.basket_tp_roi.get(volatility.value, 0.12)
 
+    # ── V2 helpers ──
+
+    def get_template_policy(self, template: str) -> dict:
+        """Trade-template management policy with safe defaults.
+
+        Args:
+            template: Template name ('core' | 'scout' | 'range').
+
+        Returns:
+            Policy dict with all keys present (missing keys default to the
+            CORE/V1-equivalent values so legacy baskets behave unchanged).
+        """
+        defaults = {
+            'size_multiplier': 1.0, 'max_layers': self.recovery_max_layers,
+            'risk_budget_pct': 0.012, 'tp_roi_multiplier': 1.0,
+            'trailing_enabled': False, 'max_hold_hours': 0,
+            'spacing_multiplier': 1.0,
+        }
+        policy = self.template_policies.get((template or 'core').lower(), {})
+        return {**defaults, **policy}
+
     def validate(self) -> list[str]:
         """Validate settings and return list of issues found.
 
@@ -463,5 +635,20 @@ class Settings:
             issues.append('max_exposure_pct must be between 0 and 1')
         if self.max_drawdown_pct <= 0 or self.max_drawdown_pct >= 1:
             issues.append('max_drawdown_pct must be between 0 and 1')
+
+        # ── V2 validation ──
+        for name in ('core', 'scout', 'range'):
+            if name not in self.template_policies:
+                issues.append(f'template_policies missing {name!r} template')
+        if self.max_total_notional_mult <= 0:
+            issues.append('max_total_notional_mult must be positive')
+        if self.event_risk_budget_pct <= 0 or self.event_risk_budget_pct >= 1:
+            issues.append('event_risk_budget_pct must be between 0 and 1')
+        if self.hysteresis_atr_mult < 0:
+            issues.append('hysteresis_atr_mult must be >= 0')
+        if self.micro_account_max_balance >= self.compact_account_max_balance:
+            issues.append(
+                'micro_account_max_balance must be below compact_account_max_balance'
+            )
 
         return issues

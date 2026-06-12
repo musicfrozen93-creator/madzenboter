@@ -7,7 +7,7 @@ regime using ADX (for regime only, never for entry decisions).
 
 import logging
 import time
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import pandas as pd
 
@@ -17,6 +17,12 @@ from exchange.client import ExchangeClient
 from signals.indicators import compute_adx, compute_atr, compute_ema, compute_rsi
 
 logger = logging.getLogger(__name__)
+
+# Absolute staleness ceiling for signal confirmation (C5 fix). Confirmation
+# is counted in consecutive EVALUATIONS of a symbol (immune to watchlist
+# pass duration); this wall-clock cap only rejects "consecutive" sightings
+# separated by watchlist churn (symbol rotated out and back hours later).
+_MAX_CONFIRMATION_GAP_SECONDS = 1800.0
 
 
 class SignalEngine:
@@ -31,15 +37,38 @@ class SignalEngine:
       Volatility: ATR vs 30-bar avg ATR → LOW / MEDIUM / HIGH
     """
 
-    def __init__(self, exchange_client: ExchangeClient, settings: Settings) -> None:
+    def __init__(
+        self,
+        exchange_client: ExchangeClient,
+        settings: Settings,
+        symbol_state_engine=None,
+        market_state_engine=None,
+    ) -> None:
         """Initialise the signal engine.
 
         Args:
             exchange_client: Exchange client for fetching OHLCV data.
             settings: Application settings.
+            symbol_state_engine: V2 SymbolStateEngine — classifies hysteresis
+                trend states on every evaluation (feeds breadth + routing).
+                Optional; None = V1-equivalent signals.
+            market_state_engine: V2 MarketStateEngine — supplies the BTC
+                factor state and the BTC 1h frame for relative strength.
         """
         self.exchange = exchange_client
         self.settings = settings
+        self.symbol_state_engine = symbol_state_engine
+        self.market_state_engine = market_state_engine
+        # Debounce store: (symbol, side) -> (count, eval_index, last ts).
+        # A raw signal must persist across consecutive EVALUATIONS of the
+        # symbol before it is emitted — kills intra-candle phantom signals
+        # that never exist on any closed chart. Consecutiveness is counted
+        # in evaluation passes (C5 fix), so the debounce works identically
+        # whether a full watchlist pass takes 10 seconds or 5 minutes.
+        self._pending: Dict[Tuple[str, str], Tuple[int, int, float]] = {}
+        # Per-symbol evaluation counter (incremented on every generate_signal
+        # call for the symbol, signal or not).
+        self._eval_index: Dict[str, int] = {}
 
     def classify_market(
         self, df_1h: pd.DataFrame, df_5m: pd.DataFrame
@@ -100,6 +129,9 @@ class SignalEngine:
         Returns:
             Signal if entry conditions are met, None otherwise.
         """
+        # Count this evaluation pass for debounce consecutiveness (C5).
+        self._eval_index[symbol] = self._eval_index.get(symbol, 0) + 1
+
         try:
             # Fetch candle data
             df_1h = self.exchange.fetch_ohlcv(
@@ -149,6 +181,23 @@ class SignalEngine:
             # ── Classify market ──
             regime, volatility = self.classify_market(df_1h, df_5m)
 
+            # ── V2: classify the symbol's hysteresis trend state ──
+            # Runs on EVERY evaluation (not just on signals) so the cached
+            # states feed market breadth and basket premise monitoring.
+            symbol_state = 'unknown'
+            relative_strength = 0.0
+            btc_state = 'unknown'
+            if self.symbol_state_engine is not None:
+                btc_df = (
+                    self.market_state_engine.get_btc_df_1h()
+                    if self.market_state_engine is not None else None
+                )
+                snapshot = self.symbol_state_engine.classify(symbol, df_1h, btc_df)
+                symbol_state = snapshot.state
+                relative_strength = snapshot.relative_strength
+            if self.market_state_engine is not None:
+                btc_state = self.market_state_engine.get_state().btc_state
+
             # ── Entry conditions (configurable RSI thresholds + optional EMA200 trend filter) ──
             # LONG  = (price > EMA200 if trend filter on) AND RSI < rsi_long_threshold
             # SHORT = (price < EMA200 if trend filter on) AND RSI > rsi_short_threshold
@@ -179,6 +228,10 @@ class SignalEngine:
                 strength = (latest_rsi - short_thr) / denom
 
             if side is None:
+                # No raw candidate — reset any pending debounce streaks so a
+                # later re-appearance starts a fresh confirmation count.
+                self._pending.pop((symbol, 'long'), None)
+                self._pending.pop((symbol, 'short'), None)
                 # Explain which filter blocked entry, with live indicator values.
                 if require_ema and current_price <= latest_ema and latest_rsi < long_thr:
                     why = (f'RSI<{long_thr:.0f} (long) but EMA trend filter blocked: '
@@ -203,6 +256,12 @@ class SignalEngine:
             # Clamp strength
             strength = max(0.1, min(1.0, strength))
 
+            # ── V2: signal persistence / debouncing ──
+            # The raw candidate must be observed on signal_confirmations
+            # consecutive evaluations (within the window) before emitting.
+            if not self._confirm_signal(symbol, side):
+                return None
+
             signal = Signal(
                 symbol=symbol,
                 side=side,
@@ -214,6 +273,9 @@ class SignalEngine:
                 ema200=latest_ema,
                 rsi=latest_rsi,
                 timestamp=time.time(),
+                symbol_state=symbol_state,
+                btc_state=btc_state,
+                relative_strength=relative_strength,
             )
 
             logger.info(
@@ -229,3 +291,52 @@ class SignalEngine:
             logger.warning('Signal generation failed for %s: %s', symbol, e)
             logger.info('SIGNAL_REJECTED %s | stage=error | %s', symbol, e)
             return None
+
+    def _confirm_signal(self, symbol: str, side: str) -> bool:
+        """Debounce: require the raw signal to persist across consecutive
+        EVALUATIONS of the symbol before emission (C5 fix).
+
+        The original wall-clock window (90s) silently suppressed signals
+        whenever a full watchlist pass took longer than the window — which
+        the 50-symbol watchlist makes routine. Consecutiveness is now
+        counted in per-symbol evaluation passes, so the debounce behaves
+        identically at any watchlist size or pass duration. A generous
+        wall-clock ceiling remains only to reject sightings separated by
+        watchlist churn (symbol rotated out and back hours later).
+
+        Args:
+            symbol: Trading pair.
+            side: Candidate side ('long' or 'short').
+
+        Returns:
+            True when the signal has been confirmed and should be emitted.
+        """
+        required = max(1, int(self.settings.signal_confirmations))
+        if required <= 1:
+            return True
+
+        now = time.time()
+        eval_idx = self._eval_index.get(symbol, 0)
+        key = (symbol, side)
+        # A candidate on one side resets the opposite side's streak.
+        opposite = (symbol, 'short' if side == 'long' else 'long')
+        self._pending.pop(opposite, None)
+
+        count, last_idx, last_ts = self._pending.get(key, (0, -2, 0.0))
+        max_gap = max(
+            float(self.settings.signal_confirmation_window_seconds),
+            _MAX_CONFIRMATION_GAP_SECONDS,
+        )
+        consecutive = (last_idx == eval_idx - 1) and (now - last_ts <= max_gap)
+        count = count + 1 if consecutive else 1
+        self._pending[key] = (count, eval_idx, now)
+
+        if count < required:
+            logger.info(
+                'SIGNAL_PENDING %s %s | confirmation %d/%d (eval #%d)',
+                side.upper(), symbol, count, required, eval_idx,
+            )
+            return False
+
+        self._pending.pop(key, None)
+        return True

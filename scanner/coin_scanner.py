@@ -130,6 +130,12 @@ class CoinScanner:
         scores.sort(key=lambda s: s.composite_score, reverse=True)
         watchlist = scores[: self.settings.max_watchlist_size]
 
+        # ── V2: tier assignment by rank ──
+        # core (full template rights) → secondary → rotation (capped below
+        # the CORE template by the router). Expands breadth to ~50 symbols
+        # while keeping full-size risk confined to the highest-quality tier.
+        self._assign_tiers(watchlist)
+
         # Persist
         self.database.save_watchlist(watchlist)
 
@@ -151,12 +157,19 @@ class CoinScanner:
         Returns:
             List of CoinScore instances with computed scores.
         """
-        # Collect raw values for normalisation
+        # Collect raw values for normalisation.
+        # V2: ATR is normalised AS A PERCENTAGE OF PRICE — absolute ATR is
+        # dominated by price level (BTC's ATR is in hundreds of dollars,
+        # DOGE's in fractions of a cent), which made the V1 bell curve
+        # price-level noise rather than a volatility preference.
         volumes = [c['volume_24h'] for c in candidates]
-        atrs = [c['atr'] for c in candidates]
+        atr_pcts = [
+            (c['atr'] / c['last_price']) if c['last_price'] > 0 else 0.0
+            for c in candidates
+        ]
 
         vol_min, vol_max = min(volumes), max(volumes)
-        atr_min, atr_max = min(atrs), max(atrs)
+        atr_min, atr_max = min(atr_pcts), max(atr_pcts)
 
         scores: List[CoinScore] = []
 
@@ -167,9 +180,10 @@ class CoinScanner:
             else:
                 volume_score = 0.5
 
-            # ATR score: bell curve — moderate ATR preferred
+            # ATR%-of-price score: bell curve — moderate volatility preferred
+            atr_pct = (c['atr'] / c['last_price']) if c['last_price'] > 0 else 0.0
             if atr_max > atr_min:
-                atr_normalized = (c['atr'] - atr_min) / (atr_max - atr_min)
+                atr_normalized = (atr_pct - atr_min) / (atr_max - atr_min)
             else:
                 atr_normalized = 0.5
             atr_score = 1.0 - abs(atr_normalized - 0.5) * 2.0
@@ -220,3 +234,27 @@ class CoinScanner:
             )
 
         return scores
+
+    def _assign_tiers(self, watchlist: List[CoinScore]) -> None:
+        """Assign V2 watchlist tiers by rank (list is already sorted desc).
+
+        Ranks 1..core_size → 'core' (full template rights), the next
+        secondary_size → 'secondary', the remainder → 'rotation' (the
+        TemplateRouter caps rotation symbols below the CORE template, so
+        the expanded breadth adds trade frequency without adding full-size
+        risk on lower-ranked symbols).
+
+        Args:
+            watchlist: Ranked CoinScore list — tiers are set in place.
+        """
+        sizes = self.settings.watchlist_tier_sizes
+        core_n = int(sizes.get('core', 20))
+        secondary_n = int(sizes.get('secondary', 15))
+
+        for rank, score in enumerate(watchlist):
+            if rank < core_n:
+                score.tier = 'core'
+            elif rank < core_n + secondary_n:
+                score.tier = 'secondary'
+            else:
+                score.tier = 'rotation'

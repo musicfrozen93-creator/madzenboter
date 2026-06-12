@@ -52,6 +52,28 @@ class Basket:
     leverage: int = 10
     account_id: Optional[int] = None  # None = master account
 
+    # ── V2 fields (persisted) ──
+    # Trade template assigned at entry ('core' | 'scout' | 'range').
+    # Legacy baskets default to 'core' and keep V1 management behaviour.
+    template: str = 'core'
+    # Pre-committed maximum basket loss in USDT, fixed at entry. Recovery
+    # layers redistribute risk INSIDE this budget — they never enlarge it.
+    # 0.0 = legacy basket (V1 stop-loss paths apply instead).
+    risk_budget: float = 0.0
+    # Wind-down: premise invalidated — no new layers; exit at
+    # break-even-or-better within a time budget.
+    wind_down: bool = False
+    wind_down_at: Optional[float] = None
+
+    # ── V2 exit-state fields (PERSISTED) ──
+    # Baskets are re-hydrated from the database every management loop, so
+    # these MUST round-trip through persistence or trailing/ratchet exits
+    # never fire (audit findings C1/C2).
+    # Peak ROI observed beyond the TP target (trailing exit tracking).
+    peak_roi: float = 0.0
+    # Break-even ratchet armed (multi-layer basket recovered to profit).
+    be_armed: bool = False
+
     # ── Computed Properties ──
 
     @property
@@ -143,6 +165,18 @@ class Signal:
     rsi: float
     timestamp: float = field(default_factory=time.time)
 
+    # ── V2 context fields ──
+    # Per-symbol hysteresis trend state (TrendState value).
+    symbol_state: str = 'unknown'
+    # Global BTC factor state at signal time (BtcFactorState value).
+    btc_state: str = 'unknown'
+    # Return differential vs BTC over the RS lookback (+ = stronger).
+    relative_strength: float = 0.0
+    # Router alignment score (0–1) — filled when the signal is routed.
+    alignment_score: float = 0.0
+    # Watchlist tier of the symbol ('core' | 'secondary' | 'rotation').
+    symbol_tier: str = 'core'
+
 
 @dataclass
 class CoinScore:
@@ -161,6 +195,9 @@ class CoinScore:
     funding_rate: float
     funding_score: float  # 0 – 1
     composite_score: float  # weighted combination
+    # V2 watchlist tier by rank: 'core' (full template rights),
+    # 'secondary', or 'rotation' (capped below CORE template).
+    tier: str = 'core'
 
 
 @dataclass

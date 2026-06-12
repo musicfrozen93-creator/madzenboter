@@ -215,6 +215,11 @@ class SignalModel(Base):
     current_price = Column(Float, nullable=False)
     ema200 = Column(Float, nullable=False)
     rsi = Column(Float, nullable=False)
+    # ── V2 context (nullable — safe for existing rows) ──
+    symbol_state = Column(String(12), nullable=True)
+    btc_state = Column(String(12), nullable=True)
+    relative_strength = Column(Float, nullable=True)
+    alignment_score = Column(Float, nullable=True)
     created_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),
@@ -344,6 +349,17 @@ class BasketModel(Base):
     status = Column(String(20), nullable=False, default='active', index=True)
     created_at = Column(Float, nullable=False)  # Unix timestamp (matches existing schema)
 
+    # ── V2 fields (nullable with server defaults — safe for existing rows) ──
+    template = Column(String(10), nullable=False, default='core', server_default='core')
+    risk_budget = Column(Float, nullable=False, default=0.0, server_default='0')
+    wind_down = Column(Boolean, nullable=False, default=False, server_default='false')
+    wind_down_at = Column(Float, nullable=True)
+    # Exit-state fields MUST be persisted: baskets are re-hydrated from the
+    # database every management loop, so in-memory-only state resets each
+    # cycle (audit findings C1/C2 — trailing TP and BE ratchet never fired).
+    peak_roi = Column(Float, nullable=False, default=0.0, server_default='0')
+    be_armed = Column(Boolean, nullable=False, default=False, server_default='false')
+
     # Relationships
     account = relationship('AccountModel', back_populates='baskets')
     layers = relationship('RecoveryLayerModel', back_populates='basket', cascade='all, delete-orphan')
@@ -395,6 +411,8 @@ class WatchlistModel(Base):
     funding_score = Column(Float, nullable=True)
     composite_score = Column(Float, nullable=True)
     updated_at = Column(Float, nullable=True)  # Unix timestamp
+    # V2 watchlist tier ('core' | 'secondary' | 'rotation')
+    tier = Column(String(12), nullable=True, server_default='core')
 
     def __repr__(self) -> str:
         return f'<Watchlist {self.symbol} score={self.composite_score}>'

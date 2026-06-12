@@ -20,11 +20,12 @@
     "high_vol_atr_multiplier": 1.5,
     "low_vol_atr_multiplier": 0.7,
 
-    "max_watchlist_size": 25,
+    "max_watchlist_size": 50,
     "min_volume_24h": 50000000,
     "max_funding_rate": 0.001,
     "min_coin_age_days": 30,
     "preferred_symbol_score_boost": 0.15,
+    "watchlist_tier_sizes": {"core": 20, "secondary": 15, "rotation": 15},
 
     "recovery_max_layers": 4,
     "recovery_margin_multipliers": [1.0, 1.33, 1.67, 2.17],
@@ -81,6 +82,83 @@
     "slippage_pct": 0.0005,
     "taker_fee_pct": 0.0004,
     "maker_fee_pct": 0.0004,
+
+    "btc_symbol": "BTC/USDT",
+    "factor_timeframe": "4h",
+    "factor_ema_fast": 50,
+    "factor_ema_slow": 200,
+    "factor_adx_impulse_threshold": 25.0,
+    "factor_state_confirmations": 2,
+    "market_state_refresh_seconds": 60,
+    "vol_expansion_ratio": 1.4,
+    "vol_compression_ratio": 0.75,
+
+    "hysteresis_atr_mult": 0.5,
+    "strong_slope_pct": 0.01,
+    "symbol_state_ttl_seconds": 900,
+    "rs_lookback_bars": 24,
+
+    "signal_confirmations": 2,
+    "signal_confirmation_window_seconds": 90,
+
+    "template_policies": {
+        "core":  {"size_multiplier": 1.0, "max_layers": 4, "risk_budget_pct": 0.012,  "tp_roi_multiplier": 1.0, "trailing_enabled": true,  "max_hold_hours": 72, "spacing_multiplier": 1.0},
+        "scout": {"size_multiplier": 0.5, "max_layers": 2, "risk_budget_pct": 0.005,  "tp_roi_multiplier": 0.6, "trailing_enabled": false, "max_hold_hours": 24, "spacing_multiplier": 1.5},
+        "range": {"size_multiplier": 0.6, "max_layers": 2, "risk_budget_pct": 0.0075, "tp_roi_multiplier": 0.6, "trailing_enabled": false, "max_hold_hours": 36, "spacing_multiplier": 1.0}
+    },
+
+    "max_total_notional_mult": 2.5,
+    "counter_factor_notional_cap_mult": 0.5,
+    "max_core_per_cluster_direction": 2,
+    "event_risk_budget_pct": 0.06,
+    "event_window_hours": 48,
+    "symbol_clusters": {
+        "BTC": "major", "ETH": "major",
+        "SOL": "l1", "BNB": "l1", "ADA": "l1", "AVAX": "l1", "DOT": "l1",
+        "ATOM": "l1", "NEAR": "l1", "APT": "l1", "SUI": "l1", "TON": "l1",
+        "TRX": "l1", "ALGO": "l1", "ICP": "l1", "SEI": "l1", "EGLD": "l1",
+        "HBAR": "l1", "VET": "l1", "FTM": "l1", "INJ": "l1", "TIA": "l1",
+        "KAS": "l1",
+        "ARB": "l2", "OP": "l2", "MATIC": "l2", "POL": "l2", "STRK": "l2",
+        "IMX": "l2", "MNT": "l2", "METIS": "l2", "MANTA": "l2", "ZK": "l2",
+        "DOGE": "meme", "SHIB": "meme", "1000SHIB": "meme", "PEPE": "meme",
+        "1000PEPE": "meme", "WIF": "meme", "BONK": "meme", "1000BONK": "meme",
+        "FLOKI": "meme", "1000FLOKI": "meme", "MEME": "meme", "BOME": "meme",
+        "NOT": "meme", "PENGU": "meme", "TRUMP": "meme",
+        "UNI": "defi", "AAVE": "defi", "MKR": "defi", "CRV": "defi",
+        "COMP": "defi", "SNX": "defi", "SUSHI": "defi", "LDO": "defi",
+        "PENDLE": "defi", "DYDX": "defi", "JUP": "defi", "RUNE": "defi",
+        "CAKE": "defi", "GMX": "defi",
+        "LINK": "infra", "GRT": "infra", "FIL": "infra", "AR": "infra",
+        "THETA": "infra", "PYTH": "infra", "API3": "infra", "BAND": "infra",
+        "FET": "ai", "RNDR": "ai", "RENDER": "ai", "AGIX": "ai",
+        "OCEAN": "ai", "TAO": "ai", "ARKM": "ai", "WLD": "ai",
+        "VIRTUAL": "ai", "AI16Z": "ai",
+        "XRP": "payments", "LTC": "payments", "BCH": "payments",
+        "XLM": "payments", "ETC": "payments", "ZEC": "payments",
+        "DASH": "payments", "EOS": "payments", "XMR": "payments",
+        "SAND": "gaming", "MANA": "gaming", "AXS": "gaming",
+        "GALA": "gaming", "APE": "gaming", "ENJ": "gaming"
+    },
+
+    "direction_demotion_losses": 3,
+    "direction_demotion_window_hours": 12.0,
+    "direction_demotion_duration_hours": 12.0,
+
+    "trailing_giveback_pct": 0.30,
+    "be_ratchet_arm_roi": 0.02,
+    "be_ratchet_floor_roi": 0.005,
+    "wind_down_max_hours": 12.0,
+    "wind_down_be_epsilon_roi": 0.0,
+    "time_triage_roi_band": 0.02,
+
+    "micro_account_max_balance": 75.0,
+    "compact_account_max_balance": 250.0,
+    "profile_policies": {
+        "full":    {"max_layers": 4, "spacing_multiplier": 1.0},
+        "compact": {"max_layers": 3, "spacing_multiplier": 1.25},
+        "micro":   {"max_layers": 2, "spacing_multiplier": 1.6}
+    },
 
     "database_url": "postgresql://trading_bot:trading_bot@localhost:5432/trading_bot",
     "log_level": "INFO"

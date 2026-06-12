@@ -76,6 +76,8 @@ class RiskManager:
         current_balance: float,
         current_exposure: float,
         active_positions: int,
+        new_notional: float = 0.0,
+        current_notional: float = 0.0,
     ) -> Tuple[bool, str]:
         """Pre-trade validation — checks all risk limits.
 
@@ -84,6 +86,9 @@ class RiskManager:
             current_balance: Current account balance.
             current_exposure: Sum of all active position margins.
             active_positions: Count of active baskets.
+            new_notional: Planned notional (margin × leverage) of the new
+                position. 0 = skip the notional check (legacy callers).
+            current_notional: Sum of active basket notionals.
 
         Returns:
             Tuple of (allowed: bool, reason: str).
@@ -135,6 +140,16 @@ class RiskManager:
 
         if current_balance < 5.0:
             return False, 'Balance too low to trade safely'
+
+        # 8. Notional exposure cap (V2) — margin caps hide leverage; this
+        #    bounds the exposure the market actually charges.
+        if new_notional > 0 and current_balance > 0:
+            max_notional = current_balance * self.settings.max_total_notional_mult
+            if current_notional + new_notional > max_notional:
+                return False, (
+                    f'Notional exposure cap exceeded '
+                    f'({current_notional + new_notional:.2f} > {max_notional:.2f})'
+                )
 
         return True, 'OK'
 
@@ -217,6 +232,99 @@ class RiskManager:
     def get_daily_starting_balance(self) -> float:
         """Return today's starting balance."""
         return self._daily_start_balance
+
+    # ───────────────────────────────────────────
+    # Direction-Aware Post-Loss Response (V2)
+    # ───────────────────────────────────────────
+    #
+    # After N consecutive losses on one side within the window, that side is
+    # DEMOTED — new signals on it still trade but only as SCOUT template
+    # (small size, one layer, fast invalidation exit). The account keeps
+    # trading; the repeating mechanism is contained, not the whole bot.
+    # A winning trade on the side, or expiry of the demotion window, clears it.
+
+    # Exit reasons that represent a GENUINE directional stop-out. Only these
+    # count toward the consecutive-loss streak (H3). Housekeeping exits
+    # (time_triage, wind_down, wind_down_timeout, break_even_exit) and mass
+    # closes (manual, api_disabled, ...) realize small losses by design and
+    # must not demote a direction.
+    _DIRECTIONAL_STOP_REASONS = frozenset({
+        'risk_budget_sl', 'basket_sl', 'emergency_sl', 'individual_sl',
+    })
+
+    def record_trade_result(
+        self, side: str, pnl: float, exit_reason: Optional[str] = None
+    ) -> None:
+        """Update consecutive-loss tracking for a closed basket.
+
+        Args:
+            side: 'long' or 'short'.
+            pnl: Realized PnL of the closed basket.
+            exit_reason: Why the basket closed. Losses count toward the
+                demotion streak only for genuine stop-out reasons; None
+                (legacy caller) preserves the original count-everything
+                behaviour. Wins clear the streak regardless of reason.
+        """
+        if side not in ('long', 'short'):
+            return
+        now = time.time()
+        key_count = f'consec_losses_{side}'
+        key_last = f'consec_losses_{side}_last_ts'
+        key_demoted = f'demoted_{side}_until'
+
+        if pnl >= 0:
+            # A win clears both the streak and any active demotion.
+            self.database.set_state(key_count, '0')
+            self.database.set_state(key_demoted, '0')
+            return
+
+        # H3: housekeeping losses are not directional failures.
+        if exit_reason is not None and exit_reason not in self._DIRECTIONAL_STOP_REASONS:
+            logger.debug(
+                'Loss on %s ignored for demotion (exit_reason=%s)',
+                side, exit_reason,
+            )
+            return
+
+        count = 0
+        try:
+            last_ts = float(self.database.get_state(key_last) or 0)
+            window = self.settings.direction_demotion_window_hours * 3600.0
+            if now - last_ts <= window:
+                count = int(float(self.database.get_state(key_count) or 0))
+        except (TypeError, ValueError):
+            count = 0
+
+        count += 1
+        self.database.set_state(key_count, str(count))
+        self.database.set_state(key_last, str(now))
+
+        if count >= self.settings.direction_demotion_losses:
+            until = now + self.settings.direction_demotion_duration_hours * 3600.0
+            self.database.set_state(key_demoted, str(until))
+            logger.warning(
+                'DIRECTION DEMOTION: %s side demoted to SCOUT after %d '
+                'consecutive losses (until %s)',
+                side.upper(), count,
+                datetime.fromtimestamp(until, tz=timezone.utc).isoformat(),
+            )
+
+    def get_demoted_sides(self) -> set:
+        """Sides currently demoted to SCOUT-only by post-loss response.
+
+        Returns:
+            Set of side strings ('long', 'short') — possibly empty.
+        """
+        demoted = set()
+        now = time.time()
+        for side in ('long', 'short'):
+            try:
+                until = float(self.database.get_state(f'demoted_{side}_until') or 0)
+            except (TypeError, ValueError):
+                until = 0.0
+            if until > now:
+                demoted.add(side)
+        return demoted
 
     # ───────────────────────────────────────────
     # Emergency Shutdown

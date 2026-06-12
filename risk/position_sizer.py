@@ -30,16 +30,21 @@ class PositionSizer:
         self.settings = settings
 
     def calculate_base_margin(
-        self, balance: float, volatility: VolatilityLevel
+        self,
+        balance: float,
+        volatility: VolatilityLevel,
+        size_multiplier: float = 1.0,
     ) -> float:
         """Calculate base (first-layer) margin for a new position.
 
-        Percentage of balance, adjusted by volatility, clamped to the dust
-        floor and the per-basket hard cap.
+        Percentage of balance, adjusted by volatility and the trade-template
+        size multiplier (V2: SCOUT/RANGE templates trade smaller), clamped to
+        the dust floor and the per-basket hard cap.
 
         Args:
             balance: Current account balance in USDT.
             volatility: Current volatility classification.
+            size_multiplier: Template size multiplier (1.0 = full CORE size).
 
         Returns:
             Base margin amount in USDT.
@@ -54,6 +59,8 @@ class PositionSizer:
             base = hi
         else:
             base = (lo + hi) / 2.0
+
+        base *= max(0.1, size_multiplier)
 
         # Dust floor and absolute per-basket hard cap.
         base = max(self.settings.min_margin_floor, base)
@@ -90,6 +97,7 @@ class PositionSizer:
         leverage: int,
         volatility: VolatilityLevel,
         market_info: dict,
+        size_multiplier: float = 1.0,
     ) -> dict:
         """Build a realistic order plan and judge its suitability for the account.
 
@@ -99,11 +107,14 @@ class PositionSizer:
         order would breach the account-size hard cap or sit too close to
         liquidation.
 
+        Args:
+            size_multiplier: V2 trade-template size multiplier (1.0 = CORE).
+
         Returns a dict:
             quantity, margin, notional, liquidation_distance_pct, leverage,
             base_margin, hard_cap, suitable (bool), reason (str).
         """
-        base_margin = self.calculate_base_margin(balance, volatility)
+        base_margin = self.calculate_base_margin(balance, volatility, size_multiplier)
         hard_cap = self.settings.get_margin_hard_cap(balance)
 
         result = {

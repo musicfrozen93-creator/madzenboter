@@ -34,23 +34,63 @@ class RecoverySystem:
         self.atr_distances = settings.recovery_atr_distances
 
     def check_recovery_trigger(
-        self, basket: Basket, current_price: float, current_atr: float
+        self,
+        basket: Basket,
+        current_price: float,
+        current_atr: float,
+        max_layers: Optional[int] = None,
+        spacing_multiplier: float = 1.0,
+        premise_ok: bool = True,
+        factor_impulse_against: bool = False,
     ) -> Optional[int]:
         """Check if price has moved enough to trigger the next recovery layer.
+
+        V2: recovery is a privilege of valid theses. Layers are gated on the
+        entry premise still holding and on the BTC factor not being in an
+        impulse against the position; layer count and spacing are template-
+        and profile-conditional; the caller passes a live (ratcheted) ATR so
+        spacing widens with expanding volatility instead of being consumed
+        by a single impulse candle measured in stale units.
 
         Args:
             basket: The active basket to check.
             current_price: Current market price.
-            current_atr: Current ATR value for distance calculation.
+            current_atr: ATR for distance calculation (caller passes
+                max(entry ATR, live ATR) — spacing may widen, never tighten).
+            max_layers: Maximum layers allowed for this basket's template /
+                account profile (None = global recovery_max_layers).
+            spacing_multiplier: Multiplier on trigger distances (template ×
+                profile; >1 = wider ladder).
+            premise_ok: False when the symbol trend state now opposes the
+                basket — averaging into an invalidated thesis is refused.
+            factor_impulse_against: True when BTC is in an IMPULSE state
+                against the basket side — no averaging into factor impulses.
 
         Returns:
-            Next layer number (2, 3, or 4) if triggered, None otherwise.
+            Next layer number (2..max) if triggered, None otherwise.
         """
         if basket.layer_count == 0:
             return None
 
+        # ── V2 gates: no averaging into dead theses or factor impulses ──
+        if not premise_ok:
+            logger.debug(
+                'Recovery blocked for %s: entry premise invalidated', basket.symbol
+            )
+            return None
+        if factor_impulse_against:
+            logger.debug(
+                'Recovery blocked for %s: BTC factor impulse against %s',
+                basket.symbol, basket.side,
+            )
+            return None
+
+        allowed_layers = self.settings.recovery_max_layers
+        if max_layers is not None:
+            allowed_layers = min(allowed_layers, max(1, int(max_layers)))
+
         next_layer = basket.layer_count + 1
-        if next_layer > self.settings.recovery_max_layers:
+        if next_layer > allowed_layers:
             return None
 
         if current_atr <= 0:
@@ -60,8 +100,10 @@ class RecoverySystem:
         layer1 = basket.layers[0]
         entry_price = layer1.entry_price
 
-        # Cumulative ATR distance from Layer 1
-        cumulative_atr = sum(self.atr_distances[:next_layer])
+        # Cumulative ATR distance from Layer 1, widened by template/profile
+        cumulative_atr = sum(self.atr_distances[:next_layer]) * max(
+            0.1, spacing_multiplier
+        )
         trigger_distance = cumulative_atr * current_atr
 
         if trigger_distance <= 0:

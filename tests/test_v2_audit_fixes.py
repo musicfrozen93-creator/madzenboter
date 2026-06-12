@@ -241,18 +241,33 @@ def test_c4_component_cache(settings):
     builds = []
     ex._build_account_components = lambda acct: builds.append(1) or ('stack',)
 
-    account = SimpleNamespace(id=7, updated_at='2026-06-12T00:00:00')
+    account = SimpleNamespace(id=7, updated_at='2026-06-12T00:00:00',
+                              encrypted_api_key='K1', encrypted_api_secret='S1',
+                              max_positions=5)
     results = [ex._get_account_components(account) for _ in range(5)]
     assert len(builds) == 1, f'C4: expected 1 build for 5 loops, got {len(builds)}'
     assert all(r is results[0] for r in results), 'must reuse the same stack'
 
-    account.updated_at = '2026-06-12T01:00:00'   # credential/settings change
+    # Participation-regression fix: updated_at churns every 60s from the
+    # sync service (cached_balance/last_sync_at writes) — it must NOT
+    # invalidate the cache anymore.
+    account.updated_at = '2026-06-12T01:00:00'
     ex._get_account_components(account)
-    assert len(builds) == 2, 'C4: updated_at change must rebuild'
+    assert len(builds) == 1, 'sync-driven updated_at churn must NOT rebuild'
+
+    # Trading-relevant changes still invalidate (credential rotation /
+    # settings edit).
+    account.max_positions = 8
+    ex._get_account_components(account)
+    assert len(builds) == 2, 'C4: trading-settings change must rebuild'
+
+    account.encrypted_api_key = 'K2'
+    ex._get_account_components(account)
+    assert len(builds) == 3, 'C4: credential rotation must rebuild'
 
     ex._component_cache[7]['built_at'] -= 10_000  # TTL expiry
     ex._get_account_components(account)
-    assert len(builds) == 3, 'C4: TTL expiry must rebuild'
+    assert len(builds) == 4, 'C4: TTL expiry must rebuild'
     print('C4 component cache (reuse / fingerprint / TTL): PASS')
 
 

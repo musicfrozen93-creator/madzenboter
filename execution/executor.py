@@ -488,7 +488,7 @@ class SignalExecutor:
             Tuple of (exchange_client, settings, position_manager,
             risk_manager) or None when construction fails.
         """
-        fingerprint = str(getattr(account, 'updated_at', '') or '')
+        fingerprint = self._account_fingerprint(account)
         now = time.time()
 
         with self._component_lock:
@@ -509,6 +509,29 @@ class SignalExecutor:
                     'components': components,
                 }
         return components
+
+    @staticmethod
+    def _account_fingerprint(account: AccountModel) -> str:
+        """Component-cache fingerprint from TRADING-RELEVANT fields only.
+
+        PARTICIPATION-REGRESSION FIX: the original C4 fingerprint used
+        ``account.updated_at`` — but the sync service writes cached_balance
+        and last_sync_at every 60 seconds, which bumps updated_at via the
+        column's onupdate trigger. The cache was therefore invalidated
+        every sync cycle, silently reducing the intended 15-minute reuse to
+        ~60 seconds and reintroducing per-loop client rebuilds and market
+        loads. Credential rotation and settings changes still invalidate:
+        the fingerprint covers every field that affects how the account
+        trades, and nothing that changes as a side effect of syncing.
+        """
+        return '|'.join(
+            str(getattr(account, field_name, ''))
+            for field_name in (
+                'encrypted_api_key', 'encrypted_api_secret', 'use_testnet',
+                'risk_pct', 'max_positions', 'leverage_override',
+                'tp_settings', 'sl_settings', 'is_active',
+            )
+        )
 
     def _build_account_components(
         self, account: AccountModel

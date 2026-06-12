@@ -190,8 +190,8 @@ class Settings:
     # ── Position Sizing Tiers ──
     position_margin_tiers: list = field(
         default_factory=lambda: [
-            {'max_balance': 50, 'margin_range': [0.40, 0.60], 'max_positions': 3},
-            {'max_balance': 100, 'margin_range': [0.60, 0.80], 'max_positions': 5},
+            {'max_balance': 50, 'margin_range': [0.40, 0.60], 'max_positions': 4},
+            {'max_balance': 100, 'margin_range': [0.60, 0.80], 'max_positions': 6},
             {'max_balance': float('inf'), 'margin_range': [0.90, 1.50], 'max_positions': 8},
         ]
     )

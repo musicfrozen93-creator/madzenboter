@@ -341,7 +341,20 @@ class PositionManager:
         profile_policy = get_profile_policy(profile, self.settings)
 
         for basket in baskets:
-            if basket.status != 'active' or basket.layer_count == 0:
+            if basket.status != 'active':
+                continue
+            if basket.layer_count == 0:
+                # Consistency repair: an 'active' basket with no active
+                # layers holds no exchange position but still counts against
+                # max_positions and blocks its symbol (possible after a crash
+                # between the last layer-close write and the basket-close
+                # write). Close it so the slot is released.
+                logger.warning(
+                    'Reconciling zero-layer active basket %s %s — releasing slot',
+                    basket.symbol, basket.id[:8],
+                )
+                basket.status = 'closed'
+                self.database.close_basket(basket.id)
                 continue
 
             try:
@@ -442,19 +455,31 @@ class PositionManager:
 
                 # ── PRIORITY 2: Wind-down handling ──
                 if basket.wind_down:
-                    # H2: "break-even or better" means NET of round-trip
-                    # costs. The configured epsilon is a lower bound; the
-                    # effective floor covers fees + exit slippage so a
-                    # wind-down exit never locks a designed loss.
+                    # H2 + participation-regression fix. The fee-aware floor
+                    # (net-positive exit) is the PREFERRED target — but
+                    # requiring it for the entire window caused wind-downs
+                    # that hover near zero to stall the full
+                    # wind_down_max_hours, pinning a position slot, the
+                    # symbol, counter-factor notional, and event-budget risk
+                    # (the post-update participation collapse). The floor
+                    # therefore applies for the FIRST HALF of the window
+                    # only; after that it falls back to the configured
+                    # epsilon — the pre-update gross break-even threshold —
+                    # so stalled wind-downs exit at the first break-even
+                    # tick and release the account's capacity.
+                    started = basket.wind_down_at or basket.created_at
+                    elapsed = time.time() - started
+                    window = self.settings.wind_down_max_hours * 3600.0
                     wind_floor = max(
                         self.settings.wind_down_be_epsilon_roi,
                         self._net_floor_roi(basket),
                     )
+                    if elapsed > window * 0.5:
+                        wind_floor = self.settings.wind_down_be_epsilon_roi
                     if roi >= wind_floor:
                         self.close_basket(basket, 'wind_down')
                         continue
-                    started = basket.wind_down_at or basket.created_at
-                    if time.time() - started > self.settings.wind_down_max_hours * 3600.0:
+                    if elapsed > window:
                         self.close_basket(basket, 'wind_down_timeout')
                         continue
                     # Winding down: no TP arming, no layers, no harvesting.
@@ -718,6 +743,20 @@ class PositionManager:
                     )
                     break
                 except Exception as e:
+                    # Position already flat on the exchange (liquidation, ADL,
+                    # manual close): Binance rejects the reduce-only order with
+                    # -2022. Without this, the basket row stayed 'active'
+                    # forever — permanently pinning a position slot and
+                    # blocking the symbol. Reconcile as externally closed.
+                    msg = str(e).lower()
+                    if '-2022' in msg or 'reduceonly order is rejected' in msg:
+                        logger.warning(
+                            'Basket %s %s already flat on exchange (%s) — '
+                            'reconciling as external_close',
+                            basket.symbol, basket.id[:8], e,
+                        )
+                        reason = 'external_close'
+                        break
                     if attempt == 2:
                         logger.critical(
                             'FAILED to close basket %s after 3 attempts: %s',

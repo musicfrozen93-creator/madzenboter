@@ -119,7 +119,10 @@ class AccountModel(Base):
 
     # Per-account risk settings (overrides global)
     risk_pct = Column(Float, default=0.02, nullable=False)  # 2% default risk per trade
-    max_positions = Column(Integer, default=5, nullable=False)
+    # Default 8 = the highest balance-tier ceiling, so the tier limits are
+    # authoritative; a lower per-account value is a deliberate restriction
+    # (create_account_settings applies it as min(tier, account)).
+    max_positions = Column(Integer, default=8, nullable=False)
     leverage_override = Column(Integer, nullable=True)  # None = use global volatility-based
 
     # Per-account TP/SL settings (JSONB for flexibility)

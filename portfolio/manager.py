@@ -101,11 +101,20 @@ class PortfolioManager:
             )
 
         # ── 2. Counter-factor notional cap ──
+        # PARTICIPATION-REGRESSION FIX: wind-down baskets are excluded from
+        # the counter-factor sum. After a factor flip, the formerly-aligned
+        # book becomes counter-factor AND winds down simultaneously — those
+        # baskets are terminating, cannot add layers, and counting their
+        # notional here hard-blocked every new entry on that side until
+        # they finished exiting. The cap exists to limit NEW counter-trend
+        # exposure growth; terminating exposure stays counted in the total
+        # notional cap, max positions, and the event risk budget.
         if market_state is not None and market_state.counter_factor(signal.side):
             counter_side = signal.side
             counter_notional = sum(
                 b.total_margin * max(b.leverage, 1)
-                for b in active_baskets if b.side == counter_side
+                for b in active_baskets
+                if b.side == counter_side and not getattr(b, 'wind_down', False)
             )
             counter_cap = balance * self.settings.counter_factor_notional_cap_mult
             if counter_notional + planned_notional > counter_cap:

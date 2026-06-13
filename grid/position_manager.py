@@ -6,6 +6,7 @@ take-profit, stop-loss, and closing. The central coordinator
 between grid, risk, and exchange modules.
 """
 
+import json
 import logging
 import time
 from typing import List, Optional
@@ -268,10 +269,21 @@ class PositionManager:
                     if basket.layer_count == 0:
                         basket.status = 'closed'
                         self.database.close_basket(basket.id)
+                        self._clear_profit_state(basket.id)
                         self._start_symbol_cooldown(basket.symbol)
                         closed = True
 
                 if closed:
+                    continue
+
+                # ── PRIORITY 1.5: Profit Protection (BE + trailing) ──
+                # Single coherent system that locks in unrealised profit on a
+                # reversal BEFORE the fixed TP target is reached. Runs before TP
+                # so a reversal exit takes precedence; if not reversed it only
+                # arms/updates state and the fixed TP below still applies.
+                prot_reason = self._check_profit_protection(basket, current_price)
+                if prot_reason:
+                    self.close_basket(basket, prot_reason)
                     continue
 
                 # ── PRIORITY 2: Take Profits ──
@@ -299,6 +311,7 @@ class PositionManager:
                 if basket.layer_count == 0:
                     basket.status = 'closed'
                     self.database.close_basket(basket.id)
+                    self._clear_profit_state(basket.id)
                     self._start_symbol_cooldown(basket.symbol)
                     continue
 
@@ -340,17 +353,25 @@ class PositionManager:
             if total_qty <= 0:
                 basket.close_all()
                 self.database.close_basket(basket.id)
+                self._clear_profit_state(basket.id)
                 self._start_symbol_cooldown(basket.symbol)
                 return None
 
             ticker = self.exchange.fetch_ticker(basket.symbol)
             current_price = ticker['last']
 
-            # Close position on exchange
+            # Close position on exchange. close_position now reconciles against
+            # the live position: if the exchange is already flat it returns
+            # {'already_flat': True} (no exception) so we still close the basket
+            # in the DB instead of looping retries and logging a false FAILURE.
+            already_flat = False
             for attempt in range(3):
                 try:
-                    self.exchange.close_position(
+                    result = self.exchange.close_position(
                         basket.symbol, basket.side, total_qty
+                    )
+                    already_flat = bool(
+                        isinstance(result, dict) and result.get('already_flat')
                     )
                     break
                 except Exception as e:
@@ -365,6 +386,14 @@ class PositionManager:
                         attempt + 1, basket.symbol, e,
                     )
                     time.sleep(1)
+
+            if already_flat:
+                logger.warning(
+                    'RECONCILE %s | basket %s was already flat on the exchange — '
+                    'marking closed in DB (exit_reason=%s). PnL recorded as a '
+                    'best-effort estimate at the current price.',
+                    basket.symbol, basket.id[:8], reason,
+                )
 
             # Calculate PnL
             unrealized = basket.unrealized_pnl(current_price)
@@ -391,9 +420,10 @@ class PositionManager:
             basket.close_all()
             self.database.close_basket(basket.id)
             self.database.save_trade(trade)
+            self._clear_profit_state(basket.id)
             # Re-entry cooldown applies after EVERY exit reason (TP, SL,
-            # emergency, manual/wind-down, etc.) — close_basket is the single
-            # chokepoint for full-basket closes.
+            # emergency, manual/wind-down, trailing/BE, etc.) — close_basket is
+            # the single chokepoint for full-basket closes.
             self._start_symbol_cooldown(basket.symbol)
 
             pnl_symbol = '+' if realized_pnl >= 0 else ''
@@ -478,6 +508,110 @@ class PositionManager:
             )
         except Exception as e:
             logger.error('Failed to set cooldown for %s: %s', symbol, e)
+
+    # ───────────────────────────────────────────
+    # Profit Protection (break-even + trailing)
+    # ───────────────────────────────────────────
+    #
+    # Per-basket arming state (be_armed, trail_armed, peak_roi) is persisted in
+    # the account-isolated bot_state KV store keyed by basket id, so protection
+    # survives a bot restart. State is cleared when the basket closes.
+
+    @staticmethod
+    def _profit_state_key(basket_id: str) -> str:
+        return f'profit_prot_{basket_id}'
+
+    def _load_profit_state(self, basket_id: str) -> dict:
+        default = {'be_armed': False, 'trail_armed': False, 'peak_roi': 0.0}
+        try:
+            raw = self.database.get_state(self._profit_state_key(basket_id))
+        except Exception:
+            return default
+        if not raw:
+            return default
+        try:
+            d = json.loads(raw)
+            return {
+                'be_armed': bool(d.get('be_armed', False)),
+                'trail_armed': bool(d.get('trail_armed', False)),
+                'peak_roi': float(d.get('peak_roi', 0.0)),
+            }
+        except Exception:
+            return default
+
+    def _save_profit_state(self, basket_id: str, state: dict) -> None:
+        try:
+            self.database.set_state(self._profit_state_key(basket_id), json.dumps(state))
+        except Exception as e:
+            logger.error('Failed to persist profit state for %s: %s', basket_id[:8], e)
+
+    def _clear_profit_state(self, basket_id: str) -> None:
+        try:
+            self.database.set_state(self._profit_state_key(basket_id), '')
+        except Exception:
+            pass
+
+    def _check_profit_protection(
+        self, basket: Basket, current_price: float
+    ) -> Optional[str]:
+        """Arm/track BE + trailing protection; return an exit reason or None.
+
+        Returns 'basket_tp_trail' or 'break_even_exit' when a reversal should
+        close the basket, else None (after persisting any arm/peak update).
+        """
+        total_margin = basket.total_margin
+        if total_margin <= 0:
+            return None
+
+        roi = basket.unrealized_pnl(current_price) / total_margin
+        st = self._load_profit_state(basket.id)
+        changed = False
+
+        # ── Arm break-even at +be_arm_roi ──
+        if not st['be_armed'] and roi >= self.settings.be_arm_roi:
+            st['be_armed'] = True
+            changed = True
+            logger.info(
+                'BE_ARMED %s %s | roi=%.2f%% >= arm=%.2f%% | floor=%.2f%%',
+                basket.side.upper(), basket.symbol, roi * 100,
+                self.settings.be_arm_roi * 100, self.settings.be_exit_roi * 100,
+            )
+
+        # ── Arm trailing at +trail_arm_roi and track the peak ──
+        if not st['trail_armed'] and roi >= self.settings.trail_arm_roi:
+            st['trail_armed'] = True
+            st['peak_roi'] = max(st['peak_roi'], roi)
+            changed = True
+            logger.info(
+                'TRAIL_ARMED %s %s | roi=%.2f%% >= arm=%.2f%% | peak=%.2f%% dist=%.2f%%',
+                basket.side.upper(), basket.symbol, roi * 100,
+                self.settings.trail_arm_roi * 100, st['peak_roi'] * 100,
+                self.settings.trail_distance_roi * 100,
+            )
+        elif st['trail_armed'] and roi > st['peak_roi']:
+            st['peak_roi'] = roi
+            changed = True
+
+        # ── Decide a protective exit (trailing first — it locks more) ──
+        exit_reason: Optional[str] = None
+        if st['trail_armed'] and roi <= st['peak_roi'] - self.settings.trail_distance_roi:
+            logger.info(
+                'TRAIL_EXIT %s %s | roi=%.2f%% pulled back from peak=%.2f%% by >=%.2f%%',
+                basket.side.upper(), basket.symbol, roi * 100,
+                st['peak_roi'] * 100, self.settings.trail_distance_roi * 100,
+            )
+            exit_reason = 'basket_tp_trail'
+        elif st['be_armed'] and roi <= self.settings.be_exit_roi:
+            logger.info(
+                'BE_EXIT %s %s | roi=%.2f%% fell to break-even floor=%.2f%%',
+                basket.side.upper(), basket.symbol, roi * 100,
+                self.settings.be_exit_roi * 100,
+            )
+            exit_reason = 'break_even_exit'
+
+        if changed and exit_reason is None:
+            self._save_profit_state(basket.id, st)
+        return exit_reason
 
     # ───────────────────────────────────────────
     # Internal Helpers

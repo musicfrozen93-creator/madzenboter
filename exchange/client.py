@@ -41,6 +41,9 @@ class ExchangeClient:
         self._api_secret = api_secret
         self.exchange: Optional[ccxt.binance] = None
         self.markets: dict = {}
+        # Cached account position mode: None=unknown, True=hedge (dual-side),
+        # False=one-way. Determined lazily on first order and reused.
+        self._hedge_mode: Optional[bool] = None
 
     @classmethod
     def for_account(cls, settings: Settings, api_key: str, api_secret: str) -> 'ExchangeClient':
@@ -229,6 +232,71 @@ class ExchangeClient:
                 })
         return open_positions
 
+    def get_position_mode(self) -> bool:
+        """Return True if the account is in Hedge (dual-side) mode, else one-way.
+
+        Binance rejects close orders that don't match the account's position
+        mode: one-way uses ``reduceOnly``; hedge mode requires ``positionSide``
+        (LONG/SHORT) and does NOT accept ``reduceOnly``. The result is cached;
+        on any error we assume one-way (the historical behaviour) so detection
+        failure never blocks trading.
+
+        Returns:
+            True for hedge mode, False for one-way.
+        """
+        if self._hedge_mode is not None:
+            return self._hedge_mode
+        try:
+            res = self.exchange.fapiPrivateGetPositionSideDual()
+            dual = res.get('dualSidePosition')
+            self._hedge_mode = dual is True or str(dual).lower() == 'true'
+            logger.info(
+                'Account position mode detected: %s',
+                'HEDGE (dual-side)' if self._hedge_mode else 'ONE-WAY',
+            )
+        except Exception as e:
+            logger.warning(
+                'Could not determine position mode (%s) — assuming ONE-WAY', e
+            )
+            self._hedge_mode = False
+        return self._hedge_mode
+
+    def fetch_position(self, symbol: str) -> dict:
+        """Fetch the LIVE position for a single symbol from the exchange.
+
+        Args:
+            symbol: Trading pair.
+
+        Returns:
+            Dict: {'contracts': float (>=0 magnitude), 'side': 'long'/'short'/None,
+                   'entryPrice': float, 'unrealizedPnl': float}. contracts == 0
+            and side is None when the symbol is flat on the exchange.
+        """
+        try:
+            positions = self._retry(lambda: self.exchange.fetch_positions([symbol]))
+        except Exception:
+            # Some ccxt/exchange combos reject the per-symbol filter — fall back.
+            positions = self._retry(lambda: self.exchange.fetch_positions())
+
+        for pos in positions:
+            if pos.get('symbol') != symbol:
+                continue
+            contracts = abs(float(pos.get('contracts', 0) or 0))
+            if contracts <= 0:
+                continue
+            side = pos.get('side')  # ccxt: 'long' / 'short'
+            if side not in ('long', 'short'):
+                # Derive from signed contracts if ccxt didn't populate side.
+                signed = float(pos.get('contracts', 0) or 0)
+                side = 'long' if signed >= 0 else 'short'
+            return {
+                'contracts': contracts,
+                'side': side,
+                'entryPrice': float(pos.get('entryPrice', 0) or 0),
+                'unrealizedPnl': float(pos.get('unrealizedPnl', 0) or 0),
+            }
+        return {'contracts': 0.0, 'side': None, 'entryPrice': 0.0, 'unrealizedPnl': 0.0}
+
     def fetch_funding_rate(self, symbol: str) -> float:
         """Fetch current funding rate for a symbol.
 
@@ -311,15 +379,21 @@ class ExchangeClient:
             )
 
         params: dict[str, Any] = {}
-        if reduce_only:
+        hedge = self.get_position_mode()
+        if hedge:
+            # Hedge mode: every order MUST carry positionSide and must NOT carry
+            # reduceOnly. For an opening/adding order, buy→LONG, sell→SHORT.
+            params['positionSide'] = 'LONG' if side == 'buy' else 'SHORT'
+        elif reduce_only:
             params['reduceOnly'] = True
 
         # Precision
         quantity = float(self.exchange.amount_to_precision(symbol, quantity))
 
         logger.info(
-            'Placing %s market %s %.8f %s (reduceOnly=%s)',
-            symbol, side, quantity, symbol, reduce_only
+            'Placing %s market %s %.8f %s (reduceOnly=%s hedge_mode=%s params=%s)',
+            symbol, side, quantity, symbol,
+            reduce_only and not hedge, hedge, params,
         )
 
         order = self._retry(
@@ -337,18 +411,110 @@ class ExchangeClient:
         return order
 
     def close_position(self, symbol: str, side: str, quantity: float) -> dict:
-        """Close a position by placing a counter market order.
+        """Close (or reduce) a position, reconciled against the LIVE exchange state.
+
+        Root-cause fix for Binance -2022 "ReduceOnly Order is rejected": instead
+        of blindly closing the DB-tracked quantity/side with reduceOnly (which
+        Binance rejects whenever the live position is already flat, smaller, or
+        on the opposite side), this:
+
+          1. queries the live position,
+          2. logs full diagnostics (live size/side, close side, reduceOnly flag,
+             hedge-mode status),
+          3. returns ``{'already_flat': True}`` WITHOUT ordering if nothing is
+             open (so the caller reconciles the DB instead of failing),
+          4. derives the close side from the LIVE position side,
+          5. clamps the close quantity to what actually exists (never oversize),
+          6. uses ``positionSide`` in hedge mode and ``reduceOnly`` in one-way.
 
         Args:
             symbol: Trading pair.
-            side: Position side ('long' or 'short').
-            quantity: Quantity to close.
+            side: DB-tracked position side ('long' or 'short').
+            quantity: Desired quantity to close (clamped to the live size).
 
         Returns:
-            CCXT order response dict.
+            CCXT order dict on a real close, or
+            ``{'already_flat': True, 'symbol': symbol, 'filled': 0.0}`` when the
+            exchange shows no position to reduce.
         """
-        close_side = 'sell' if side == 'long' else 'buy'
-        return self.place_market_order(symbol, close_side, quantity, reduce_only=True)
+        if not self.has_credentials:
+            raise PermissionError(
+                'close_position called on a keyless market-data client.'
+            )
+
+        hedge = self.get_position_mode()
+        live = self.fetch_position(symbol)
+        live_qty = live['contracts']
+        live_side = live['side']
+        intended_close_side = 'sell' if side == 'long' else 'buy'
+
+        # ── Diagnostics requested for the -2022 investigation ──
+        logger.info(
+            'CLOSE_DIAGNOSTIC %s | db_side=%s db_req_qty=%.8f | '
+            'exch_pos_size=%.8f exch_pos_side=%s | close_side=%s '
+            'reduceOnly=%s hedge_mode=%s',
+            symbol, side, quantity, live_qty, live_side,
+            intended_close_side, (not hedge), hedge,
+        )
+
+        # ── (5) Position already closed on exchange → reconcile, don't error ──
+        if live_qty <= 0 or live_side is None:
+            logger.warning(
+                'CLOSE_SKIP %s | exchange shows NO open position (already flat) — '
+                'reduceOnly would be rejected (-2022). Reconciling DB; no order sent.',
+                symbol,
+            )
+            return {'already_flat': True, 'symbol': symbol, 'filled': 0.0}
+
+        # ── (3) Derive close side from the LIVE position, not stale DB state ──
+        close_side = 'sell' if live_side == 'long' else 'buy'
+        if live_side != side:
+            logger.warning(
+                'CLOSE_SIDE_MISMATCH %s | db_side=%s but exchange_side=%s — '
+                'closing the EXCHANGE side (%s).',
+                symbol, side, live_side, close_side,
+            )
+
+        # ── (4) Clamp to the real position size; never try to over-reduce ──
+        close_qty = min(quantity, live_qty) if quantity > 0 else live_qty
+        if quantity > live_qty:
+            logger.warning(
+                'CLOSE_SIZE_MISMATCH %s | db_qty=%.8f > exch_qty=%.8f — '
+                'closing only the live %.8f to avoid -2022.',
+                symbol, quantity, live_qty, live_qty,
+            )
+        close_qty = float(self.exchange.amount_to_precision(symbol, close_qty))
+        if close_qty <= 0:
+            logger.warning(
+                'CLOSE_SKIP %s | close qty rounds to 0 (live=%.8f) — reconciling.',
+                symbol, live_qty,
+            )
+            return {'already_flat': True, 'symbol': symbol, 'filled': 0.0}
+
+        # ── (1/2) Mode-correct params: hedge→positionSide, one-way→reduceOnly ──
+        params: dict[str, Any] = {}
+        if hedge:
+            params['positionSide'] = 'LONG' if live_side == 'long' else 'SHORT'
+        else:
+            params['reduceOnly'] = True
+
+        logger.info(
+            'Closing %s | side=%s qty=%.8f hedge_mode=%s params=%s',
+            symbol, close_side, close_qty, hedge, params,
+        )
+        order = self._retry(
+            lambda: self.exchange.create_order(
+                symbol=symbol, type='market', side=close_side,
+                amount=close_qty, params=params,
+            )
+        )
+        logger.info(
+            'Close filled: %s %s %.8f @ %.4f | ID: %s',
+            close_side, symbol, close_qty,
+            float(order.get('average', order.get('price', 0)) or 0),
+            order.get('id', 'N/A'),
+        )
+        return order
 
     # ───────────────────────────────────────────
     # Symbol Info

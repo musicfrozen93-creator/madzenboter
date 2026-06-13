@@ -42,6 +42,11 @@
     },
     "individual_tp_atr_mult": 2.0,
 
+    "be_arm_roi": 0.03,
+    "be_exit_roi": 0.005,
+    "trail_arm_roi": 0.05,
+    "trail_distance_roi": 0.02,
+
     "individual_sl_atr_mult": 3.0,
     "basket_sl_pct": 0.20,
     "emergency_sl_account_pct": 0.03,

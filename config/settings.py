@@ -142,6 +142,20 @@ class Settings:
     )
     individual_tp_atr_mult: float = 2.0
 
+    # ── Profit Protection (single coherent BE + trailing system) ──
+    # Layered on top of the fixed basket TP targets above (which are unchanged).
+    # Protects unrealised profit on a reversal so winners don't become losers.
+    #   • BE armed at be_arm_roi; once armed, a fall back to be_exit_roi closes
+    #     the basket near break-even (be_exit_roi kept slightly positive to
+    #     absorb round-trip fees/slippage).
+    #   • Trailing armed at trail_arm_roi; tracks peak ROI and closes if ROI
+    #     pulls back from the peak by trail_distance_roi (lets trends run).
+    # ROI here is basket unrealised PnL / total basket margin.
+    be_arm_roi: float = 0.03          # arm break-even protection at +3%
+    be_exit_roi: float = 0.005        # once armed, exit if ROI falls to +0.5%
+    trail_arm_roi: float = 0.05       # arm trailing at +5%
+    trail_distance_roi: float = 0.02  # close on a 2% ROI pullback from peak
+
     # ── Stop Loss ──
     individual_sl_atr_mult: float = 3.0
     basket_sl_pct: float = 0.20

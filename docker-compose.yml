@@ -1,0 +1,55 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: zengrid-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: zengrid
+      POSTGRES_USER: zengrid
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zengrid_dev_password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zengrid -d zengrid"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  zengrid-engine:
+    build: .
+    container_name: zengrid-engine
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - TZ=UTC
+      # The bot container needs NO exchange API keys. All trading credentials
+      # are loaded per-user from the database and decrypted with the encryption
+      # key below. Only DB creds, the encryption key, and app secrets are passed.
+      - DATABASE_URL=postgresql://zengrid:${POSTGRES_PASSWORD:-zengrid_dev_password}@postgres:5432/zengrid
+      - MASTER_ENCRYPTION_KEY=${MASTER_ENCRYPTION_KEY}
+      - ADMIN_API_KEY=${ADMIN_API_KEY}
+      - ADMIN_API_PORT=${ADMIN_API_PORT:-8000}
+    ports:
+      - "${ADMIN_API_PORT:-8000}:${ADMIN_API_PORT:-8000}"
+    volumes:
+      - logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pgdata:
+  logs:

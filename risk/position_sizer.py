@@ -55,15 +55,32 @@ class PositionSizer:
         else:
             base = (lo + hi) / 2.0
 
+        hard_cap = self.settings.get_margin_hard_cap(balance)
+
+        # ── Progression-fit clamp ──
+        # Size the first layer so the ENTIRE recovery progression fits within the
+        # per-basket hard cap: base × Σ(recovery_margin_multipliers) ≤ hard_cap.
+        # This keeps total basket margin bounded by the cap even after all layers
+        # are added, so recovery never compounds a basket past the ceiling while
+        # still allowing every layer to fire. The recovery multipliers and ATR
+        # trigger distances themselves are unchanged — only the base is scaled.
+        multipliers = self.settings.recovery_margin_multipliers
+        progression_sum = sum(multipliers) if multipliers else 1.0
+        if progression_sum > 0:
+            # Truncate (floor) to 4dp so the FINAL rounded base still satisfies
+            # base × Σ ≤ hard_cap. Rounding up here would tip the last layer one
+            # hair over the cap and the recovery gate would needlessly drop it.
+            max_base = int((hard_cap / progression_sum) * 1e4) / 1e4
+            base = min(base, max_base)
+
         # Dust floor and absolute per-basket hard cap.
         base = max(self.settings.min_margin_floor, base)
-        base = min(base, self.settings.get_margin_hard_cap(balance))
+        base = min(base, hard_cap)
 
         logger.debug(
             'Position size: balance=%.2f vol=%s → margin=%.4f '
-            '(target=%.2f–%.2f hard_cap=%.2f)',
-            balance, volatility.value, base, lo, hi,
-            self.settings.get_margin_hard_cap(balance),
+            '(target=%.2f–%.2f progression_sum=%.2f hard_cap=%.2f)',
+            balance, volatility.value, base, lo, hi, progression_sum, hard_cap,
         )
         return round(base, 4)
 

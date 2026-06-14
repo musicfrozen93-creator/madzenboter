@@ -101,7 +101,7 @@ def migrate_database(sqlite_path: str, pg_url: str, master_api_key: str, master_
                 is_active=True,
                 use_testnet=True,  # Default to testnet as bot default
                 risk_pct=0.02,
-                max_positions=5,
+                max_positions=10,
             )
             pg_session.add(master_account)
             pg_session.flush()

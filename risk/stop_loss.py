@@ -3,7 +3,7 @@ Zentry Futures Core — Stop Loss Manager.
 
 Implements three levels of stop-loss protection:
   1. Individual SL — per-layer stop at 3× ATR
-  2. Basket SL — basket loss > 20% of total basket margin
+  2. Basket SL — basket loss > 15% of total basket margin
   3. Emergency SL — single basket loss > 3% of account balance
 """
 

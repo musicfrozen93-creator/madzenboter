@@ -108,7 +108,7 @@ class AccountManager:
                     is_active=kwargs.get('is_active', True),
                     use_testnet=use_testnet,
                     risk_pct=kwargs.get('risk_pct', 0.02),
-                    max_positions=kwargs.get('max_positions', 5),
+                    max_positions=kwargs.get('max_positions', 10),
                     leverage_override=kwargs.get('leverage_override'),
                     tp_settings=kwargs.get('tp_settings'),
                     sl_settings=kwargs.get('sl_settings'),

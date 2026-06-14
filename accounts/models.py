@@ -16,7 +16,7 @@ class AccountCreate(BaseModel):
     is_active: bool = True
     use_testnet: bool = False
     risk_pct: float = Field(default=0.02, ge=0.001, le=0.5)
-    max_positions: int = Field(default=5, ge=1, le=50)
+    max_positions: int = Field(default=10, ge=1, le=50)
     leverage_override: Optional[int] = Field(default=None, ge=1, le=125)
     tp_settings: Optional[Dict[str, Any]] = None
     sl_settings: Optional[Dict[str, Any]] = None

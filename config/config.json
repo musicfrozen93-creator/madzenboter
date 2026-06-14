@@ -48,7 +48,7 @@
     "trail_distance_roi": 0.02,
 
     "individual_sl_atr_mult": 3.0,
-    "basket_sl_pct": 0.20,
+    "basket_sl_pct": 0.15,
     "emergency_sl_account_pct": 0.03,
 
     "daily_loss_limit_pct": 0.05,
@@ -63,6 +63,7 @@
     "catastrophic_drawdown_pct": 0.50,
 
     "margin_hard_cap_pct": 0.10,
+    "basket_margin_abs_cap": 2.50,
     "margin_target_pct_range": [0.025, 0.05],
     "min_margin_floor": 0.30,
     "min_liquidation_distance_pct": 0.04,
@@ -83,9 +84,9 @@
     },
 
     "position_margin_tiers": [
-        {"max_balance": 50, "margin_range": [1.0, 2.0], "max_positions": 3},
-        {"max_balance": 100, "margin_range": [2.0, 4.0], "max_positions": 5},
-        {"max_balance": 999999, "margin_range": [5.0, 7.0], "max_positions": 8}
+        {"max_balance": 50, "margin_range": [1.0, 2.0], "max_positions": 6},
+        {"max_balance": 100, "margin_range": [2.0, 4.0], "max_positions": 8},
+        {"max_balance": 999999, "margin_range": [5.0, 7.0], "max_positions": 10}
     ],
 
     "slippage_pct": 0.0005,

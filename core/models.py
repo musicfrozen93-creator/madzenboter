@@ -119,7 +119,7 @@ class AccountModel(Base):
 
     # Per-account risk settings (overrides global)
     risk_pct = Column(Float, default=0.02, nullable=False)  # 2% default risk per trade
-    max_positions = Column(Integer, default=5, nullable=False)
+    max_positions = Column(Integer, default=10, nullable=False)
     leverage_override = Column(Integer, nullable=True)  # None = use global volatility-based
 
     # Per-account TP/SL settings (JSONB for flexibility)

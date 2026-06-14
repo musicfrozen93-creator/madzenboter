@@ -158,7 +158,7 @@ class Settings:
 
     # ── Stop Loss ──
     individual_sl_atr_mult: float = 3.0
-    basket_sl_pct: float = 0.20
+    basket_sl_pct: float = 0.15
     emergency_sl_account_pct: float = 0.03
 
     # ── Risk Management ──
@@ -188,6 +188,13 @@ class Settings:
     # combined) may consume, as a fraction of account balance.
     # $20 → $2.00, $50 → $5.00, $100 → $10.00, $500 → $50.00.
     margin_hard_cap_pct: float = 0.10
+    # ABSOLUTE ceiling on the TOTAL margin a single basket (all recovery layers
+    # combined) may consume, in USDT. Layered on top of the percentage cap above:
+    # the effective per-basket cap is min(balance × margin_hard_cap_pct,
+    # basket_margin_abs_cap). This bounds basket growth so accounts can hold more
+    # simultaneous positions and recovery layers can never compound a basket past
+    # this figure. NO basket may ever exceed this total, including every layer.
+    basket_margin_abs_cap: float = 2.50
     # Target margin for the FIRST entry layer, as a fraction of balance.
     # Volatility picks within this range (HIGH→low end, LOW→high end).
     # $20 → $0.50–$1.00, $50 → $1.25–$2.50, $100 → $2.50–$5.00.
@@ -221,9 +228,9 @@ class Settings:
     # ── Position Sizing Tiers ──
     position_margin_tiers: list = field(
         default_factory=lambda: [
-            {'max_balance': 50, 'margin_range': [0.40, 0.60], 'max_positions': 3},
-            {'max_balance': 100, 'margin_range': [0.60, 0.80], 'max_positions': 5},
-            {'max_balance': float('inf'), 'margin_range': [0.90, 1.50], 'max_positions': 8},
+            {'max_balance': 50, 'margin_range': [0.40, 0.60], 'max_positions': 6},
+            {'max_balance': 100, 'margin_range': [0.60, 0.80], 'max_positions': 8},
+            {'max_balance': float('inf'), 'margin_range': [0.90, 1.50], 'max_positions': 10},
         ]
     )
 
@@ -413,11 +420,21 @@ class Settings:
     # ── Account-Size-Aware Margin & Drawdown helpers ──
 
     def get_margin_hard_cap(self, balance: float) -> float:
-        """Hard ceiling on TOTAL margin per basket for this balance.
+        """Hard ceiling on TOTAL margin per basket (all layers) for this balance.
 
-        $20→$2, $50→$5, $100→$10, $500→$50. Never below the dust floor.
+        Two limits combined — the SMALLER wins:
+          • Percentage cap: balance × margin_hard_cap_pct (account-size aware:
+            $20→$2.00, $50→$5.00, $100→$10.00) — never below the dust floor.
+          • Absolute cap: basket_margin_abs_cap (USDT).
+
+        With basket_margin_abs_cap = 2.50 the effective cap is:
+          $20→$2.00, $25→$2.50, $50→$2.50, $100→$2.50, $500→$2.50.
+        No basket can ever exceed basket_margin_abs_cap, including every recovery
+        layer combined. This single chokepoint is consulted by the position
+        sizer, the recovery system, and the risk manager.
         """
-        return max(self.min_margin_floor, balance * self.margin_hard_cap_pct)
+        pct_cap = max(self.min_margin_floor, balance * self.margin_hard_cap_pct)
+        return min(pct_cap, self.basket_margin_abs_cap)
 
     def get_target_margin_range(self, balance: float) -> tuple[float, float]:
         """(min, max) target margin for the FIRST entry layer, in USDT.

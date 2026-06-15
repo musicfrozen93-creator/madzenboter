@@ -39,6 +39,10 @@ class FakeStateDB:
     def close_basket(self, basket_id: str) -> None:
         self.store[f'closed_{basket_id}'] = True
 
+    # Called by RiskManager._check_daily_reset on a UTC day rollover.
+    def save_daily_stats(self, stats: dict, account_id=None) -> None:
+        self.store.setdefault('daily_stats', []).append(stats)
+
 
 @pytest.fixture
 def fake_db() -> FakeStateDB:

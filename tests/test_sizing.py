@@ -1,4 +1,5 @@
-"""Regression tests for position sizing and recovery-layer margins (CHANGE #8)."""
+"""Regression tests for balance-tier position sizing and recovery-layer
+margins (CHANGE #2 / #1: tiered sizing, 2-layer recovery)."""
 
 from config.settings import Settings, VolatilityLevel
 from grid.recovery import RecoverySystem
@@ -12,28 +13,41 @@ def _market_info(min_notional=5.0, min_qty=0.001, amount_precision=0.001):
     }
 
 
-def test_base_margin_is_fixed_two_dollars(settings: Settings):
+def test_base_margin_is_tiered_by_balance(settings: Settings):
+    # CHANGE #2 — Layer-1 margin is fixed per balance tier, vol-independent.
     sizer = PositionSizer(settings)
-    for balance in (10, 50, 200, 5000):
+    expected = {10: 1.5, 50: 1.5, 75: 2.5, 200: 2.5, 500: 3.5, 5000: 3.5}
+    for balance, l1 in expected.items():
         for vol in VolatilityLevel:
-            assert sizer.calculate_base_margin(balance, vol) == 2.0
+            assert sizer.calculate_base_margin(balance, vol) == l1
 
 
-def test_recovery_layer_margins_sum_to_five(settings: Settings):
+def test_recovery_is_two_layers_summing_to_tier_cap(settings: Settings):
+    # CHANGE #1 + #2 — exactly two layers; their sum equals the tier cap.
     recovery = RecoverySystem(settings)
 
     class _B:
         side = 'long'
 
-    margins = []
-    for layer_number in range(1, settings.recovery_max_layers + 1):
-        lp = recovery.calculate_layer_params(
-            _B(), layer_number, base_margin=2.0, current_price=100.0, leverage=10
-        )
-        margins.append(lp.margin)
+    # Maximum layers per basket is 2.
+    assert settings.recovery_max_layers == 2
 
-    assert margins == [2.0, 1.0, 1.0, 1.0]
-    assert abs(sum(margins) - 5.0) < 1e-9
+    cases = {
+        10: ([1.5, 1.0], 2.5),    # Tier A
+        100: ([2.5, 1.0], 3.5),   # Tier B
+        500: ([3.5, 1.0], 4.5),   # Tier C
+    }
+    for balance, (expected_margins, cap) in cases.items():
+        margins = []
+        for layer_number in range(1, settings.recovery_max_layers + 1):
+            lp = recovery.calculate_layer_params(
+                _B(), layer_number, base_margin=expected_margins[0],
+                current_price=100.0, leverage=10, balance=balance,
+            )
+            margins.append(lp.margin)
+        assert margins == expected_margins
+        assert abs(sum(margins) - cap) < 1e-9
+        assert sum(margins) <= settings.get_margin_hard_cap(balance) + 1e-9
 
 
 def test_evaluate_entry_rejects_when_min_order_exceeds_cap(settings: Settings):
@@ -57,8 +71,8 @@ def test_evaluate_entry_suitable_for_cheap_liquid_coin(settings: Settings):
         volatility=VolatilityLevel.MEDIUM, market_info=mi,
     )
     assert plan['suitable'] is True
-    # First-layer margin must never exceed the $5 basket cap.
-    assert plan['margin'] <= settings.max_basket_margin_usd
+    # First-layer margin must never exceed the account tier's basket cap.
+    assert plan['margin'] <= settings.get_margin_hard_cap(200.0)
 
 
 def test_first_layer_never_exceeds_cap_across_prices(settings: Settings):
@@ -70,4 +84,4 @@ def test_first_layer_never_exceeds_cap_across_prices(settings: Settings):
             volatility=VolatilityLevel.MEDIUM, market_info=mi,
         )
         if plan['suitable']:
-            assert plan['margin'] <= settings.max_basket_margin_usd + 1e-9
+            assert plan['margin'] <= settings.get_margin_hard_cap(500.0) + 1e-9

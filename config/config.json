@@ -5,6 +5,7 @@
     "signal_timeframe": "5m",
     "trend_timeframe": "1h",
     "loop_interval_seconds": 10,
+    "signal_eval_interval_seconds": 30,
 
     "rsi_period": 14,
     "ema_period": 200,
@@ -30,9 +31,9 @@
     "min_coin_age_days": 30,
     "preferred_symbol_score_boost": 0.15,
 
-    "recovery_max_layers": 4,
-    "recovery_margin_multipliers": [1.0, 1.33, 1.67, 2.17],
-    "recovery_atr_distances": [0.0, 0.75, 1.0, 1.25],
+    "recovery_max_layers": 2,
+    "recovery_margin_multipliers": [1.0, 1.0],
+    "recovery_atr_distances": [0.0, 0.75],
 
     "basket_tp_roi": {
         "low": 0.15,
@@ -61,6 +62,16 @@
     ],
     "catastrophic_drawdown_pct": 0.50,
 
+    "daily_profit_lock_tiers": [
+        {"gain": 0.08, "floor": 0.05},
+        {"gain": 0.10, "floor": 0.08},
+        {"gain": 0.12, "floor": 0.10}
+    ],
+    "daily_profit_hard_stop_pct": 0.15,
+
+    "loss_streak_threshold": 3,
+    "loss_streak_pause_seconds": 3600,
+
     "margin_hard_cap_pct": 0.10,
     "margin_target_pct_range": [0.025, 0.05],
     "min_margin_floor": 0.30,
@@ -82,8 +93,13 @@
     },
 
     "max_positions": 8,
-    "max_basket_margin_usd": 5.0,
-    "basket_layer_margins_usd": [2.0, 1.0, 1.0, 1.0],
+    "max_basket_margin_usd": 4.5,
+    "basket_layer_margins_usd": [2.0, 1.0],
+    "basket_sizing_tiers": [
+        {"max_balance": 50, "layer1": 1.50, "layer2": 1.00, "max_basket": 2.50},
+        {"max_balance": 200, "layer1": 2.50, "layer2": 1.00, "max_basket": 3.50},
+        {"max_balance": 99999, "layer1": 3.50, "layer2": 1.00, "max_basket": 4.50}
+    ],
 
     "position_margin_tiers": [
         {"max_balance": 50, "margin_range": [1.0, 2.0], "max_positions": 8},

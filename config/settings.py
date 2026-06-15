@@ -89,6 +89,12 @@ class Settings:
     signal_timeframe: str = '5m'
     trend_timeframe: str = '1h'
     loop_interval_seconds: int = 10
+    # How often NEW-entry signal generation runs. Exit management runs every
+    # loop_interval_seconds REGARDLESS of this value; throttling only the
+    # (slower) signal phase keeps the exit cycle on the tight loop cadence so
+    # open positions are never delayed behind scanning for new opportunities.
+    # Entries are driven by 5m candles, so a 30s re-evaluation loses no setups.
+    signal_eval_interval_seconds: int = 30
 
     # ── Indicators ──
     rsi_period: int = 14
@@ -134,13 +140,19 @@ class Settings:
     # rotation for $20–$100 accounts.
     preferred_symbol_score_boost: float = 0.15
 
-    # ── Recovery System ──
-    recovery_max_layers: int = 4
+    # ── Recovery System (2-layer: initial entry + ONE recovery layer) ──
+    # Layer 1 = initial entry, Layer 2 = the single recovery layer. There is no
+    # third or fourth layer: the maximum number of layers per basket is 2. This
+    # bounds the size a losing basket can grow to while keeping one averaging
+    # layer of recovery capability.
+    recovery_max_layers: int = 2
     recovery_margin_multipliers: list = field(
-        default_factory=lambda: [1.0, 1.33, 1.67, 2.17]
+        default_factory=lambda: [1.0, 1.0]
     )
+    # Layer 2 triggers at 0.75 × ATR below/above the Layer-1 entry (existing
+    # spacing for the first recovery layer is preserved unchanged).
     recovery_atr_distances: list = field(
-        default_factory=lambda: [0.0, 0.75, 1.0, 1.25]
+        default_factory=lambda: [0.0, 0.75]
     )
 
     # ── Take Profit & Profit Protection ──
@@ -192,6 +204,35 @@ class Settings:
     # requiring manual review. Routine daily drawdown does NOT.
     catastrophic_drawdown_pct: float = 0.50
 
+    # ── Daily Profit Trailing Lock (per-account, persisted) ──
+    # Protects realized daily gains. Daily gain is measured from the day's
+    # starting balance. As gain crosses each tier's `gain` level a profit `floor`
+    # is ARMED; the floor only ratchets UP, never down. If daily gain later falls
+    # back to the armed floor, NEW entries stop for the rest of the UTC day. At
+    # the hard-stop level NEW entries stop immediately. Existing positions keep
+    # being managed and closed. State is per-account and resets each UTC day.
+    #
+    #   gain 8%  → floor 5%
+    #   gain 10% → floor 8%
+    #   gain 12% → floor 10%
+    #   gain 15% → immediate hard stop (no new entries the rest of the day)
+    daily_profit_lock_tiers: list = field(
+        default_factory=lambda: [
+            {'gain': 0.08, 'floor': 0.05},
+            {'gain': 0.10, 'floor': 0.08},
+            {'gain': 0.12, 'floor': 0.10},
+        ]
+    )
+    daily_profit_hard_stop_pct: float = 0.15
+
+    # ── Loss-Streak Pause (per-account, persisted) ──
+    # After this many CONSECUTIVE losing baskets, pause NEW entries for
+    # loss_streak_pause_seconds. Any winning/break-even basket resets the streak.
+    # Existing positions keep being managed; the pause auto-expires and survives
+    # restart (stored in the DB state store like other persistent protections).
+    loss_streak_threshold: int = 3
+    loss_streak_pause_seconds: int = 3600
+
     # ── Account-Size-Aware Margin Caps ──
     # Hard ceiling on the TOTAL margin a single basket (all recovery layers
     # combined) may consume, as a fraction of account balance.
@@ -227,17 +268,32 @@ class Settings:
         default_factory=lambda: {'low': 10, 'medium': 8, 'high': 5}
     )
 
-    # ── Position Sizing (fixed, account-independent) ──
-    # Every account uses the SAME participation: a fixed maximum TOTAL basket
-    # margin and a fixed per-layer margin distribution (in absolute USDT). This
-    # guarantees consistent sizing across all accounts regardless of balance.
+    # ── Position Sizing (balance-tier fixed basket sizing) ──
+    # Baskets are NOT sized as a percentage of balance. Each account falls into a
+    # balance TIER with FIXED absolute per-layer margins (USDT) and a FIXED total
+    # basket-margin cap. Layer 1 = initial entry, Layer 2 = the single recovery
+    # layer; their sum equals (and never exceeds) the tier's max_basket cap.
     #
-    #   Layer 1 = $2.00, Layer 2 = $1.00, Layer 3 = $1.00, Layer 4 = $1.00
-    #   Combined total = $5.00 (never exceeded — enforced by the recovery cap).
+    #   Tier A   $10–$50    L1 $1.50   L2 $1.00   max basket $2.50
+    #   Tier B   $50–$200   L1 $2.50   L2 $1.00   max basket $3.50
+    #   Tier C   > $200     L1 $3.50   L2 $1.00   max basket $4.50
+    #
+    # First tier whose max_balance >= balance wins (so $50 → A, $200 → B).
     max_positions: int = 8
-    max_basket_margin_usd: float = 5.0
+    basket_sizing_tiers: list = field(
+        default_factory=lambda: [
+            {'max_balance': 50, 'layer1': 1.50, 'layer2': 1.00, 'max_basket': 2.50},
+            {'max_balance': 200, 'layer1': 2.50, 'layer2': 1.00, 'max_basket': 3.50},
+            {'max_balance': float('inf'), 'layer1': 3.50, 'layer2': 1.00, 'max_basket': 4.50},
+        ]
+    )
+    # Absolute global ceiling — no basket may EVER exceed this across any tier.
+    # Equals the largest tier cap (Tier C, $4.50). Backstop for legacy callers.
+    max_basket_margin_usd: float = 4.5
+    # Legacy fixed per-layer distribution, used ONLY when no balance is supplied
+    # to get_layer_margin(); superseded by basket_sizing_tiers when balance known.
     basket_layer_margins_usd: list = field(
-        default_factory=lambda: [2.0, 1.0, 1.0, 1.0]
+        default_factory=lambda: [2.0, 1.0]
     )
 
     # ── Position Sizing Tiers (legacy; max_positions now fixed via `max_positions`) ──
@@ -311,6 +367,9 @@ class Settings:
         for tier in raw.get('daily_drawdown_tiers', []):
             if tier.get('max_balance', 0) >= 999_999_999:
                 tier['max_balance'] = float('inf')
+        for tier in raw.get('basket_sizing_tiers', []):
+            if tier.get('max_balance', 0) >= 999_999_999:
+                tier['max_balance'] = float('inf')
 
         settings = cls()
         for key, value in raw.items():
@@ -331,14 +390,22 @@ class Settings:
         This allows each account to have custom risk_pct, max_positions,
         leverage, TP/SL settings while inheriting all other global settings.
 
+        Globally enforced (NOT overridable per account):
+            - max_positions   → always the global value (8)
+            - basket_sl_pct   → always the global value (15%)
+            - basket_tp_target_roi / profit_protection_arm_roi /
+              profit_protection_floor_roi → not in the override path at all
+              (basket TP 15% and profit protection 10%→8% are global for all).
+
         Args:
             base_settings: The global Settings instance.
             overrides: Dict of account-specific overrides. Supported keys:
                 - risk_pct: float (overrides daily_loss_limit_pct)
-                - max_positions: int (applied as cap across all tiers)
+                - max_positions: int (IGNORED — max positions is globally fixed)
                 - leverage_override: int (overrides all volatility-based leverage)
-                - tp_settings: dict (merged into basket_tp_roi, individual_tp_atr_mult)
-                - sl_settings: dict (merged into basket_sl_pct, individual_sl_atr_mult, etc.)
+                - tp_settings: dict (individual_tp_atr_mult only; basket TP is global)
+                - sl_settings: dict (individual_sl_atr_mult, emergency_sl_account_pct;
+                  basket_sl_pct is IGNORED — basket SL is globally fixed at 15%)
 
         Returns:
             New Settings instance with account-specific values.
@@ -375,8 +442,16 @@ class Settings:
         # SL settings override
         sl = overrides.get('sl_settings')
         if sl and isinstance(sl, dict):
+            # basket_sl_pct is INTENTIONALLY NOT overridable per account. The
+            # basket stop-loss is force-fixed to the global value (15%) for every
+            # account — exactly like max_positions — so no legacy account JSON can
+            # bypass it. Any `basket_sl_pct` key in sl_settings is ignored here.
             if 'basket_sl_pct' in sl:
-                account_settings.basket_sl_pct = sl['basket_sl_pct']
+                logger.warning(
+                    'Ignoring account basket_sl_pct override (%s): basket SL is '
+                    'globally enforced at %.0f%%.',
+                    sl['basket_sl_pct'], account_settings.basket_sl_pct * 100,
+                )
             if 'individual_sl_atr_mult' in sl:
                 account_settings.individual_sl_atr_mult = sl['individual_sl_atr_mult']
             if 'emergency_sl_account_pct' in sl:
@@ -436,24 +511,43 @@ class Settings:
 
     # ── Account-Size-Aware Margin & Drawdown helpers ──
 
+    def get_basket_sizing_tier(self, balance: float) -> dict:
+        """Return the balance-tier sizing config for the given balance.
+
+        First tier whose max_balance >= balance wins (Tier A <= $50,
+        Tier B <= $200, Tier C otherwise). Each tier dict carries
+        `layer1`, `layer2`, and `max_basket` absolute USDT margins.
+        """
+        for tier in self.basket_sizing_tiers:
+            if balance <= tier['max_balance']:
+                return tier
+        return self.basket_sizing_tiers[-1]
+
     def get_margin_hard_cap(self, balance: float) -> float:
         """Hard ceiling on TOTAL margin per basket (all layers combined).
 
-        Now a FIXED absolute cap (`max_basket_margin_usd`, default $5.00) that is
-        identical for every account, so a single basket can never consume more
-        than $5 of margin in total across Layers 1–4. The `balance` argument is
-        ignored (kept for backward-compatible call sites).
+        Balance-tier based: $2.50 (Tier A, <= $50), $3.50 (Tier B, <= $200),
+        $4.50 (Tier C, > $200). Clamped to the absolute global ceiling
+        (`max_basket_margin_usd`, $4.50). The recovery cap in the position
+        manager enforces this across Layer 1 + Layer 2 so a basket can never
+        exceed its tier maximum.
         """
-        return self.max_basket_margin_usd
+        cap = self.get_basket_sizing_tier(balance)['max_basket']
+        return min(cap, self.max_basket_margin_usd)
 
-    def get_layer_margin(self, layer_number: int) -> float:
-        """Absolute target margin (USDT) for a given 1-based recovery layer.
+    def get_layer_margin(self, layer_number: int, balance: Optional[float] = None) -> float:
+        """Absolute target margin (USDT) for a given 1-based layer.
 
-        Reads the fixed per-layer distribution (`basket_layer_margins_usd`).
-        Layers beyond the configured list reuse the last entry. The sum of all
-        layers equals `max_basket_margin_usd` ($5) by construction.
+        When `balance` is supplied, returns the balance-TIER margin
+        (Layer 1 = tier['layer1'], Layer 2 = tier['layer2']). Layers beyond the
+        configured pair reuse the last entry. When `balance` is None, falls back
+        to the legacy fixed distribution (`basket_layer_margins_usd`).
         """
-        margins = self.basket_layer_margins_usd or [self.max_basket_margin_usd]
+        if balance is not None:
+            tier = self.get_basket_sizing_tier(balance)
+            margins = [tier['layer1'], tier['layer2']]
+        else:
+            margins = self.basket_layer_margins_usd or [self.max_basket_margin_usd]
         idx = max(1, layer_number) - 1
         if idx >= len(margins):
             idx = len(margins) - 1
@@ -524,6 +618,11 @@ class Settings:
         # access the bot container itself needs is keyless PUBLIC market data.
         if self.recovery_max_layers < 1 or self.recovery_max_layers > 10:
             issues.append('recovery_max_layers must be between 1 and 10')
+        if self.recovery_max_layers > 2:
+            issues.append(
+                'recovery_max_layers must not exceed 2 '
+                '(Layer 1 initial entry + Layer 2 single recovery layer)'
+            )
         if len(self.recovery_margin_multipliers) != self.recovery_max_layers:
             issues.append('recovery_margin_multipliers length must match recovery_max_layers')
         if len(self.recovery_atr_distances) != self.recovery_max_layers:
@@ -531,13 +630,43 @@ class Settings:
         if self.daily_loss_limit_pct <= 0 or self.daily_loss_limit_pct >= 1:
             issues.append('daily_loss_limit_pct must be between 0 and 1')
 
-        # Fixed $5 basket sizing: per-layer margins must sum to within the cap.
+        # Legacy fixed distribution must still fit within the global ceiling.
         layer_sum = sum(self.basket_layer_margins_usd or [])
         if layer_sum > self.max_basket_margin_usd + 1e-9:
             issues.append(
                 f'basket_layer_margins_usd sum ({layer_sum:.2f}) exceeds '
                 f'max_basket_margin_usd ({self.max_basket_margin_usd:.2f})'
             )
+
+        # Balance-tier basket sizing: each tier's two layers must fit its cap,
+        # and no tier cap may exceed the absolute global ceiling.
+        for tier in self.basket_sizing_tiers:
+            layers_sum = tier.get('layer1', 0) + tier.get('layer2', 0)
+            cap = tier.get('max_basket', 0)
+            if layers_sum > cap + 1e-9:
+                issues.append(
+                    f"basket_sizing_tier layers ({layers_sum:.2f}) exceed its "
+                    f"max_basket cap ({cap:.2f})"
+                )
+            if cap > self.max_basket_margin_usd + 1e-9:
+                issues.append(
+                    f"basket_sizing_tier cap ({cap:.2f}) exceeds global "
+                    f"max_basket_margin_usd ({self.max_basket_margin_usd:.2f})"
+                )
+
+        # Daily profit trailing lock: each floor must be below its arming gain,
+        # and every arming gain must be below the immediate hard-stop level.
+        for t in self.daily_profit_lock_tiers:
+            if t.get('floor', 0) >= t.get('gain', 0):
+                issues.append('daily_profit_lock floor must be < its gain trigger')
+            if t.get('gain', 0) >= self.daily_profit_hard_stop_pct:
+                issues.append('daily_profit_lock gain must be < daily_profit_hard_stop_pct')
+
+        # Loss-streak pause sanity.
+        if self.loss_streak_threshold < 1:
+            issues.append('loss_streak_threshold must be >= 1')
+        if self.loss_streak_pause_seconds <= 0:
+            issues.append('loss_streak_pause_seconds must be > 0')
         if self.profit_protection_floor_roi >= self.profit_protection_arm_roi:
             issues.append('profit_protection_floor_roi must be < profit_protection_arm_roi')
         if self.profit_protection_arm_roi >= self.basket_tp_target_roi:

@@ -9,6 +9,7 @@ with batch processing.
 """
 
 import logging
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
@@ -105,6 +106,17 @@ class SignalExecutor:
         self.master_settings = master_settings
         self.max_workers = max_workers
         self.batch_size = batch_size
+
+        # ── Per-account component cache ──
+        # Building components calls exchange_client.initialize() → load_markets()
+        # (a full network round-trip). Without caching this ran once per account
+        # in manage_all_accounts AND once per account PER COIN during the signal
+        # fan-out — the dominant source of exit-close latency. We cache the built
+        # tuple per account and reuse it across loops; it is rebuilt only when the
+        # account's credentials or risk settings change. Balance/risk state are
+        # always refreshed at use-time, so cached components never go stale.
+        self._component_cache: dict = {}
+        self._cache_lock = threading.Lock()
 
     def execute_signal(self, signal: Signal) -> List[ExecutionResult]:
         """Save signal and execute it concurrently on all active accounts.
@@ -307,10 +319,18 @@ class SignalExecutor:
             )
 
     def manage_all_accounts(self) -> None:
-        """Periodically manage baskets/positions across all active accounts."""
+        """Manage baskets/positions across all active accounts CONCURRENTLY.
+
+        Exit handling (TP/SL/profit-protection/emergency) runs here. Accounts are
+        processed in parallel on a thread pool so that when several accounts need
+        to close at once, later accounts are NOT delayed behind earlier ones.
+        """
         active_accounts = self.account_manager.get_active_accounts()
         if not active_accounts:
             return
+
+        # Forget components for accounts that are no longer active.
+        self._prune_component_cache({a.id for a in active_accounts})
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = [
@@ -412,10 +432,65 @@ class SignalExecutor:
                 extra={'account_id': account_id}
             )
 
+    @staticmethod
+    def _component_fingerprint(account: AccountModel) -> tuple:
+        """Fingerprint of every account field that affects component construction.
+
+        Any change (key rotation, testnet toggle, risk/leverage/TP/SL overrides)
+        changes the fingerprint and forces a rebuild; otherwise the cached
+        components (and their already-loaded markets) are reused.
+        """
+        return (
+            account.encrypted_api_key,
+            account.encrypted_api_secret,
+            account.use_testnet,
+            account.risk_pct,
+            account.leverage_override,
+            str(account.tp_settings),
+            str(account.sl_settings),
+        )
+
+    def _prune_component_cache(self, active_ids: set) -> None:
+        """Drop cached components for accounts that are no longer active."""
+        with self._cache_lock:
+            for aid in [a for a in self._component_cache if a not in active_ids]:
+                self._component_cache.pop(aid, None)
+
     def _build_account_components(
         self, account: AccountModel
     ) -> Optional[Tuple[ExchangeClient, Settings, PositionManager, RiskManager]]:
-        """Helper to build settings, exchange client, and managers for an account.
+        """Return cached components for an account, rebuilding only on change.
+
+        Reuses the cached exchange client (with markets already loaded) and
+        managers when the account's credential/risk fingerprint is unchanged,
+        eliminating the repeated load_markets() that previously ran on every
+        loop and every signal fan-out. Construction happens OUTSIDE the cache
+        lock so concurrent management of different accounts is never serialized.
+
+        Args:
+            account: AccountModel instance.
+
+        Returns:
+            Tuple of (exchange_client, settings, position_manager, risk_manager) or None.
+        """
+        fingerprint = self._component_fingerprint(account)
+        with self._cache_lock:
+            cached = self._component_cache.get(account.id)
+        if cached and cached[0] == fingerprint:
+            return cached[1]
+
+        components = self._construct_account_components(account)
+        if components is None:
+            return None
+
+        with self._cache_lock:
+            self._component_cache[account.id] = (fingerprint, components)
+        return components
+
+    def _construct_account_components(
+        self, account: AccountModel
+    ) -> Optional[Tuple[ExchangeClient, Settings, PositionManager, RiskManager]]:
+        """Build settings, exchange client, and managers for an account (uncached).
 
         Args:
             account: AccountModel instance.

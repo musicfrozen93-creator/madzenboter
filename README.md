@@ -10,10 +10,12 @@ A standalone hybrid Binance USDT-M Futures scalping grid bot optimised for small
 - **Small Account Optimised** — Works with as little as 30 USDT, automatically scales sizing
 - **Dynamic Coin Scanner** — Scans all USDT-M futures pairs every 10 minutes, scores by volume, ATR, spread, and funding rate
 - **Market Classification** — Detects trending/sideways regimes and low/medium/high volatility to adapt parameters
-- **4-Layer Recovery** — Controlled averaging (NOT martingale) with ATR-based spacing and gentle margin progression
-- **Three-Tier Stop Loss** — Individual (3× ATR), basket (20% margin), emergency (3% account)
-- **Basket Take Profit** — Primary exit: 8/12/15% ROI targets by volatility across all layers
-- **Risk Management** — 5% daily loss limit, 25% max exposure, 15% max drawdown with emergency shutdown
+- **2-Layer Recovery** — Initial entry + ONE recovery layer (NOT martingale) with ATR-based spacing; bounds losing-basket size
+- **Three-Tier Stop Loss** — Individual (3× ATR), basket (15% margin), emergency (3% account)
+- **Basket Take Profit** — Primary exit: fixed 15% ROI target with a trailing profit-protection lock
+- **Risk Management** — Tiered daily drawdown, 25%+ max exposure, catastrophic-drawdown shutdown
+- **Daily Profit Trailing Lock** — Ratcheting floor (8→5, 10→8, 12→10) + hard stop at 15% daily gain
+- **Loss-Streak Pause** — 3 consecutive losing baskets pauses new entries for 1 hour (auto-expiring, persisted)
 - **Dynamic Leverage** — 10× low vol, 8× medium, 5× high volatility
 - **Complete Backtesting** — Bar-by-bar simulation with slippage, fees, and all risk rules
 - **Docker Deployment** — Production-ready with volume persistence
@@ -129,15 +131,18 @@ Data, logs, and config are persisted via volume mounts.
 | `daily_loss_limit_pct` | `0.05` | 5% daily loss limit |
 | `max_exposure_pct` | `0.25` | 25% max capital exposure |
 | `max_drawdown_pct` | `0.15` | 15% max drawdown (triggers shutdown) |
-| `recovery_max_layers` | `4` | Maximum recovery layers per basket |
+| `recovery_max_layers` | `2` | Maximum layers per basket (initial entry + 1 recovery) |
 
-### Position Sizing Tiers
+### Balance-Tier Basket Sizing (fixed, not % of balance)
 
-| Account Size | Margin per Layer 1 | Max Positions |
-|-------------|-------------------|---------------|
-| < 50 USDT | 0.40 – 0.60 USDT | 3 |
-| 50 – 100 USDT | 0.60 – 0.80 USDT | 5 |
-| > 100 USDT | 0.90 – 1.50 USDT | 8 |
+| Tier | Account Size | Layer 1 | Layer 2 | Max Basket Margin | Max Positions |
+|------|-------------|---------|---------|-------------------|---------------|
+| A | $10 – $50 | $1.50 | $1.00 | $2.50 | 8 |
+| B | $50 – $200 | $2.50 | $1.00 | $3.50 | 8 |
+| C | > $200 | $3.50 | $1.00 | $4.50 | 8 |
+
+First tier whose `max_balance >= balance` wins ($50 → A, $200 → B). The two layers
+sum to exactly the tier's max-basket cap, which a basket can never exceed.
 
 ### Leverage by Volatility
 
@@ -157,8 +162,10 @@ Data, logs, and config are persisted via volume mounts.
 2. **Max Exposure (25%)** — Blocks new entries when total margin exposure exceeds 25% of balance
 3. **Max Drawdown (15%)** — Emergency shutdown with manual restart required
 4. **Emergency Stop Loss** — Force-closes any basket whose loss exceeds 3% of total account
-5. **Basket Stop Loss** — Closes basket when loss exceeds 20% of basket margin
+5. **Basket Stop Loss** — Closes basket when loss exceeds 15% of basket margin
 6. **Individual Stop Loss** — Per-layer stop at 3× ATR from entry
+7. **Daily Profit Trailing Lock** — Once daily gain reaches 8/10/12%, arms a 5/8/10% floor; if gain falls back to the floor, new entries stop for the day. 15% gain is an immediate hard stop. Existing positions still managed.
+8. **Loss-Streak Pause** — 3 consecutive losing baskets pauses new entries for 1 hour (per-account, persisted, auto-expiring)
 
 ### Emergency Shutdown
 
@@ -194,14 +201,15 @@ main.py                  CLI entry point
 - **LONG:** Price > EMA200 (1h) AND RSI(14) < 30 (5m)
 - **SHORT:** Price < EMA200 (1h) AND RSI(14) > 70 (5m)
 
-### Recovery System
+### Recovery System (2 layers max)
 
 ```
-Layer 1: base_margin × 1.00    at entry
-Layer 2: base_margin × 1.33    at 0.75 × ATR from Layer 1
-Layer 3: base_margin × 1.67    at 1.75 × ATR from Layer 1 (cumulative)
-Layer 4: base_margin × 2.17    at 3.00 × ATR from Layer 1 (cumulative)
+Layer 1 (initial entry): tier['layer1']    at entry
+Layer 2 (one recovery):  tier['layer2']     at 0.75 × ATR from Layer 1
 ```
+
+Per-tier margins: A $1.50/$1.00, B $2.50/$1.00, C $3.50/$1.00. There is no third
+or fourth layer — the maximum number of layers per basket is 2.
 
 ---
 

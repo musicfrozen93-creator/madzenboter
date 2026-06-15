@@ -1,9 +1,9 @@
 """
 Zentry Futures Core — Recovery System.
 
-Controlled 4-layer averaging system (NOT martingale).
-Layers are added when price moves against the position by
-ATR-based distances with gentle margin progression.
+Controlled 2-layer averaging system (NOT martingale): an initial entry plus a
+single recovery layer. The recovery layer is added when price moves against the
+position by an ATR-based distance. There is no third or fourth layer.
 """
 
 import logging
@@ -16,17 +16,19 @@ logger = logging.getLogger(__name__)
 
 
 class RecoverySystem:
-    """Controlled recovery layer management.
+    """Controlled recovery layer management (max 2 layers per basket).
 
-    Layer parameters (fixed absolute margin, account-independent):
-      Layer 1: $2.00  at entry
-      Layer 2: $1.00  at 0.75 × ATR from Layer 1
-      Layer 3: $1.00  at 1.75 × ATR from Layer 1  (cumulative)
-      Layer 4: $1.00  at 3.00 × ATR from Layer 1  (cumulative)
+    Layer parameters (balance-tier absolute margin):
+      Layer 1 (initial entry): tier['layer1']  at entry
+      Layer 2 (one recovery):  tier['layer2']  at 0.75 × ATR from Layer 1
 
-    Per-layer margins come from settings.basket_layer_margins_usd and sum to the
-    $5 basket cap. Distances are cumulative from Layer 1 entry price.
-    Margin progression is gentle — no doubling or martingale.
+        Tier A ($10–$50):   L1 $1.50  L2 $1.00  (cap $2.50)
+        Tier B ($50–$200):  L1 $2.50  L2 $1.00  (cap $3.50)
+        Tier C (> $200):    L1 $3.50  L2 $1.00  (cap $4.50)
+
+    Per-layer margins come from settings.get_layer_margin(layer, balance) and
+    their sum equals the tier basket cap. The Layer-2 trigger distance is
+    measured from the Layer-1 entry price. No doubling or martingale.
     """
 
     def __init__(self, settings: Settings) -> None:
@@ -98,6 +100,7 @@ class RecoverySystem:
         base_margin: float,
         current_price: float,
         leverage: int,
+        balance: float,
     ) -> RecoveryLayer:
         """Calculate parameters for a new recovery layer.
 
@@ -107,14 +110,15 @@ class RecoverySystem:
             base_margin: Base margin from position sizer.
             current_price: Current market price (entry price for this layer).
             leverage: Current leverage setting.
+            balance: Current account balance (selects the sizing tier).
 
         Returns:
             RecoveryLayer with calculated margin and quantity.
         """
-        # Fixed absolute per-layer margin (account-independent). The configured
-        # distribution ($2 / $1 / $1 / $1) sums to the $5 basket cap; the total
-        # basket margin is additionally hard-capped in the position manager.
-        margin = self.settings.get_layer_margin(layer_number)
+        # Balance-tier absolute per-layer margin. The tier's two layers sum to
+        # the tier basket cap; the total basket margin is additionally
+        # hard-capped against the tier cap in the position manager.
+        margin = self.settings.get_layer_margin(layer_number, balance)
         notional = margin * leverage
         quantity = notional / current_price if current_price > 0 else 0
 

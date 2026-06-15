@@ -70,6 +70,7 @@ class TradingEngine:
         self.settings = settings
         self._running = False
         self._last_scan_time = 0.0
+        self._last_signal_eval = 0.0
         self._last_status_log = 0.0
         self._watchlist: List[CoinScore] = []
         # Account-based trading is the ONLY mode. _account_trading_enabled is True
@@ -332,7 +333,22 @@ class TradingEngine:
             loop_start = time.time()
 
             try:
-                # 1. Run coin scanner at interval (public market data)
+                trading = bool(self._account_trading_enabled and self._signal_executor)
+
+                # ── 1. EXITS FIRST (top priority) ──
+                # Manage existing positions for EVERY active account BEFORE any
+                # scanning or signal generation. Exit conditions (TP / SL /
+                # profit-protection / emergency) must always take priority over
+                # new entries, so this runs first and on every loop iteration —
+                # never starved by, or waiting behind, the signal phase below.
+                # Accounts are managed concurrently inside the executor.
+                if trading:
+                    try:
+                        self._signal_executor.manage_all_accounts()
+                    except Exception as e:
+                        logger.error('Per-account basket management error: %s', e)
+
+                # ── 2. Coin scanner (public market data, at scan interval) ──
                 if time.time() - self._last_scan_time >= self.settings.scan_interval_seconds:
                     try:
                         self._watchlist = self.scanner.scan()
@@ -344,57 +360,23 @@ class TradingEngine:
                     except Exception as e:
                         logger.error('Scan failed: %s', e)
 
-                # 2. If account trading is disabled, scan only — never trade.
-                if not (self._account_trading_enabled and self._signal_executor):
+                # ── 3. If account trading is disabled, scan only — never trade. ──
+                if not trading:
                     self._log_status()
                     elapsed = time.time() - loop_start
                     time.sleep(max(1.0, self.settings.loop_interval_seconds - elapsed))
                     continue
 
-                # 3. Manage existing positions for EVERY active account.
-                #    Each account is handled in isolation inside the executor;
-                #    one account's failure never affects the others.
-                try:
-                    self._signal_executor.manage_all_accounts()
-                except Exception as e:
-                    logger.error('Per-account basket management error: %s', e)
+                # ── 4. NEW ENTRIES (lower priority, throttled) ──
+                # Generating signals across the whole watchlist is the slowest
+                # phase. It is throttled to signal_eval_interval_seconds so the
+                # exit cycle above keeps running on the tight loop cadence and is
+                # never delayed waiting for scanning of new opportunities.
+                if time.time() - self._last_signal_eval >= self.settings.signal_eval_interval_seconds:
+                    self._last_signal_eval = time.time()
+                    self._evaluate_signals()
 
-                # 4. Generate signals from the shared watchlist and fan each out.
-                #    Per-account eligibility (subscription) and per-account risk
-                #    limits decide independently whether each account takes it.
-                if not self._watchlist:
-                    logger.warning(
-                        'WATCHLIST_EMPTY | no symbols to evaluate — scanner has not '
-                        'populated a watchlist yet (no signals possible).'
-                    )
-                evaluated = 0
-                found = 0
-                for coin in self._watchlist:
-                    try:
-                        evaluated += 1
-                        sig = self.signal_engine.generate_signal(coin.symbol)
-                        if not sig:
-                            continue  # signal_engine logs SIGNAL_REJECTED with the reason
-                        found += 1
-                        results = self._signal_executor.execute_signal(sig)
-                        if results:
-                            success_count = sum(1 for r in results if r.success)
-                            logger.info(
-                                'Signal %s %s fanned out — %d/%d eligible accounts handled',
-                                sig.side.upper(), coin.symbol,
-                                success_count, len(results),
-                            )
-                    except Exception as e:
-                        logger.debug('Signal error for %s: %s', coin.symbol, e)
-
-                if evaluated:
-                    logger.info(
-                        'SIGNAL_FUNNEL | watchlist=%d evaluated=%d signals_found=%d '
-                        'rejected_at_signal=%d (per-account accept/reject logged above)',
-                        len(self._watchlist), evaluated, found, evaluated - found,
-                    )
-
-                # 5. Log periodic status
+                # ── 5. Log periodic status ──
                 self._log_status()
 
             except Exception as e:
@@ -405,6 +387,47 @@ class TradingEngine:
             elapsed = time.time() - loop_start
             sleep_time = max(1.0, self.settings.loop_interval_seconds - elapsed)
             time.sleep(sleep_time)
+
+    def _evaluate_signals(self) -> None:
+        """Generate signals from the shared watchlist and fan each out.
+
+        Strictly LOWER priority than exit management (which always runs first in
+        the loop). Per-account eligibility (subscription) and per-account risk
+        limits decide independently whether each account takes a signal.
+        """
+        if not self._watchlist:
+            logger.warning(
+                'WATCHLIST_EMPTY | no symbols to evaluate — scanner has not '
+                'populated a watchlist yet (no signals possible).'
+            )
+            return
+
+        evaluated = 0
+        found = 0
+        for coin in self._watchlist:
+            try:
+                evaluated += 1
+                sig = self.signal_engine.generate_signal(coin.symbol)
+                if not sig:
+                    continue  # signal_engine logs SIGNAL_REJECTED with the reason
+                found += 1
+                results = self._signal_executor.execute_signal(sig)
+                if results:
+                    success_count = sum(1 for r in results if r.success)
+                    logger.info(
+                        'Signal %s %s fanned out — %d/%d eligible accounts handled',
+                        sig.side.upper(), coin.symbol,
+                        success_count, len(results),
+                    )
+            except Exception as e:
+                logger.debug('Signal error for %s: %s', coin.symbol, e)
+
+        if evaluated:
+            logger.info(
+                'SIGNAL_FUNNEL | watchlist=%d evaluated=%d signals_found=%d '
+                'rejected_at_signal=%d (per-account accept/reject logged above)',
+                len(self._watchlist), evaluated, found, evaluated - found,
+            )
 
     def _log_status(self) -> None:
         """Log periodic engine status every 5 minutes (account-based).

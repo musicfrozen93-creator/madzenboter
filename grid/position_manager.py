@@ -7,6 +7,7 @@ between grid, risk, and exchange modules.
 """
 
 import logging
+import threading
 import time
 from typing import List, Optional
 
@@ -59,6 +60,15 @@ class PositionManager:
         self.sl_manager = sl_manager
         self.signal_engine = signal_engine
 
+        # ── Double-close guard ──
+        # Tracks basket IDs whose close is in flight so a basket can never be
+        # closed twice (no duplicate/redundant reduce-only orders), even if two
+        # passes or threads race on the same basket. Paired with the basket
+        # status check below and the reduce-only/benign-error handling in
+        # close_basket(), this makes closing fully idempotent.
+        self._closing_lock = threading.Lock()
+        self._closing: set = set()
+
     # ───────────────────────────────────────────
     # Open Position
     # ───────────────────────────────────────────
@@ -88,6 +98,19 @@ class PositionManager:
             signal.side.upper(), signal.symbol, balance, vol.value, leverage,
             signal.current_price,
         )
+
+        # ── New-entry protections (daily profit lock + loss-streak pause) ──
+        # These block ONLY the opening of a NEW basket. Existing baskets keep
+        # being managed (recovery layers, TP/SL, profit protection) regardless,
+        # so this gate intentionally does NOT touch can_open_position (which is
+        # also used for recovery). Checked early to avoid needless API calls.
+        allowed_new, gate_reason = self.risk_manager.can_take_new_entry(balance)
+        if not allowed_new:
+            logger.info(
+                'SIGNAL_REJECTED %s | stage=new_entry_lock | reason=%s | balance=%.2f',
+                signal.symbol, gate_reason, balance,
+            )
+            return None
 
         # Get market info for quantity calculation
         try:
@@ -234,6 +257,15 @@ class PositionManager:
         """
         remaining: List[Basket] = []
 
+        # Keep the daily profit trailing lock armed as realized balance changes
+        # (arms/ratchets the floor; sets the lock if a floor is breached or the
+        # hard stop is hit). Affects only NEW entries — never existing baskets.
+        if self.risk_manager is not None:
+            try:
+                self.risk_manager.update_daily_profit_lock(balance)
+            except Exception as e:
+                logger.debug('Daily profit-lock update failed: %s', e)
+
         for basket in baskets:
             if basket.status != 'active' or basket.layer_count == 0:
                 continue
@@ -334,6 +366,20 @@ class PositionManager:
         Returns:
             TradeRecord if successful, None on error.
         """
+        # ── Idempotent-close guard (prevents duplicate close orders) ──
+        # Atomically claim this basket for closing. If it is already closing or
+        # no longer active, bail out — never submit a second close. Marking the
+        # status 'closing' makes any concurrent or re-entrant call short-circuit.
+        with self._closing_lock:
+            if basket.status != 'active' or basket.id in self._closing:
+                logger.info(
+                    'CLOSE_SKIP %s | basket %s already closing/closed (reason=%s)',
+                    basket.symbol, basket.id[:8], reason,
+                )
+                return None
+            self._closing.add(basket.id)
+            basket.status = 'closing'
+
         try:
             total_qty = basket.total_quantity
             if total_qty <= 0:
@@ -372,7 +418,9 @@ class PositionManager:
                         'Close attempt %d failed for %s: %s — retrying',
                         attempt + 1, basket.symbol, e,
                     )
-                    time.sleep(1)
+                    # Short backoff only: closing must not be postponed by long
+                    # sleeps. The first attempt is immediate; retries are brief.
+                    time.sleep(0.25)
 
             # Calculate PnL
             unrealized = basket.unrealized_pnl(current_price)
@@ -401,6 +449,21 @@ class PositionManager:
             self.database.save_trade(trade)
             self._finalize_closed_state(basket.symbol, basket.id)
 
+            # ── Post-close new-entry protections (per-account, persisted) ──
+            # Record the basket outcome for the consecutive-loss streak, and
+            # re-evaluate the daily profit lock against the post-close balance so
+            # a winning close arms/ratchets the floor and a losing close can trip
+            # it. These gate NEW entries only — never the management of existing
+            # baskets, so they live here rather than in can_open_position.
+            if self.risk_manager is not None:
+                try:
+                    self.risk_manager.record_basket_result(realized_pnl)
+                    post_balance = self.exchange.fetch_balance().get('total', 0.0)
+                    if post_balance:
+                        self.risk_manager.update_daily_profit_lock(post_balance)
+                except Exception as e:
+                    logger.debug('Post-close risk update failed: %s', e)
+
             pnl_symbol = '+' if realized_pnl >= 0 else ''
             trade_logger.info(
                 'CLOSE %s %s [%s] | entry=%.4f exit=%.4f | '
@@ -416,6 +479,12 @@ class PositionManager:
         except Exception as e:
             logger.error('Error closing basket %s: %s', basket.id[:8], e)
             return None
+        finally:
+            # Release the in-flight claim. On success the basket is already
+            # 'closed' (close_all) and excluded from future active loads; on
+            # failure the DB row stays 'active' so the next pass retries cleanly.
+            with self._closing_lock:
+                self._closing.discard(basket.id)
 
     def close_all_baskets(
         self, baskets: List[Basket], reason: str
@@ -617,14 +686,14 @@ class PositionManager:
 
         base_margin = self.position_sizer.calculate_base_margin(balance, vol)
         layer_params = self.recovery.calculate_layer_params(
-            basket, layer_number, base_margin, current_price, basket.leverage
+            basket, layer_number, base_margin, current_price, basket.leverage, balance
         )
 
-        # ── Per-basket hard margin cap ──
-        # The total margin across ALL layers of a single basket may never exceed
-        # the fixed $5 basket cap (max_basket_margin_usd). This is the primary
-        # guard that keeps combined Layer 1–4 margin at or below $5 for every
-        # account, and is what enforces the $5 ceiling after all recovery layers.
+        # ── Per-basket hard margin cap (balance-tier) ──
+        # The total margin across BOTH layers of a single basket may never exceed
+        # the account tier's basket cap ($2.50 / $3.50 / $4.50). This is the
+        # primary guard that keeps combined Layer 1 + Layer 2 margin at or below
+        # the tier cap, enforcing the tier ceiling after the recovery layer.
         hard_cap = self.settings.get_margin_hard_cap(balance)
         projected_basket_margin = basket.total_margin + layer_params.margin
         if projected_basket_margin > hard_cap:

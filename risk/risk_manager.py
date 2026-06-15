@@ -64,6 +64,8 @@ class RiskManager:
             self._current_date = today
             self.database.set_state('daily_start_balance', str(balance))
             self.database.set_state('daily_start_date', today)
+            # New UTC day → reset the daily profit trailing lock for this account.
+            self._reset_daily_profit_lock()
 
         logger.info(
             'Risk manager initialised: HWM=%.2f daily_start=%.2f date=%s',
@@ -111,12 +113,12 @@ class RiskManager:
         if active_positions >= max_pos:
             return False, f'Max positions reached ({active_positions}/{max_pos})'
 
-        # 5. Per-basket hard margin cap (account-size aware)
+        # 5. Per-basket hard margin cap (balance-tier based)
         hard_cap = self.settings.get_margin_hard_cap(current_balance)
         if margin > hard_cap:
             return False, (
-                f'Margin {margin:.2f} exceeds per-trade hard cap {hard_cap:.2f} '
-                f'({self.settings.margin_hard_cap_pct:.0%} of {current_balance:.2f})'
+                f'Margin {margin:.2f} exceeds per-basket tier cap {hard_cap:.2f} '
+                f'(balance={current_balance:.2f})'
             )
 
         # 6. Exposure limit
@@ -219,6 +221,185 @@ class RiskManager:
         return self._daily_start_balance
 
     # ───────────────────────────────────────────
+    # New-Entry Gate (profit lock + loss streak)
+    # ───────────────────────────────────────────
+
+    def can_take_new_entry(self, current_balance: float) -> Tuple[bool, str]:
+        """Gate for OPENING a NEW basket (not recovery, not management).
+
+        Blocks new entries when the daily profit lock is active or a loss-streak
+        pause is in effect. Existing positions are unaffected and continue to be
+        managed and closed normally.
+
+        Args:
+            current_balance: Current account balance.
+
+        Returns:
+            Tuple of (allowed: bool, reason: str).
+        """
+        if self.check_daily_profit_lock(current_balance):
+            reason = self.database.get_state('profit_lock_reason') or 'floor'
+            if reason == 'hard_stop':
+                return False, (
+                    f'daily profit hard-stop reached '
+                    f'({self.settings.daily_profit_hard_stop_pct:.0%} gain) — '
+                    f'no new entries for the rest of the day'
+                )
+            floor = float(self.database.get_state('profit_lock_floor') or 0.0)
+            return False, (
+                f'daily profit lock active (gain fell back to {floor:.0%} floor) '
+                f'— no new entries for the rest of the day'
+            )
+        if self.is_loss_streak_paused():
+            mins = self.loss_streak_pause_remaining() / 60.0
+            return False, (
+                f'loss-streak pause active ({mins:.0f}m remaining after '
+                f'{self.settings.loss_streak_threshold} consecutive losing baskets)'
+            )
+        return True, 'OK'
+
+    # ───────────────────────────────────────────
+    # Daily Profit Trailing Lock (per-account, persisted)
+    # ───────────────────────────────────────────
+
+    def daily_gain_pct(self, current_balance: float) -> float:
+        """Daily gain as a SIGNED fraction of the day's starting balance."""
+        if self._daily_start_balance <= 0:
+            return 0.0
+        return (current_balance - self._daily_start_balance) / self._daily_start_balance
+
+    def update_daily_profit_lock(self, current_balance: float) -> bool:
+        """Arm/ratchet the daily profit floor and apply the hard stop.
+
+        Ratchets the armed floor UP as daily gain crosses each tier (8%→5%,
+        10%→8%, 12%→10%), and sets a sticky lock if either (a) gain reaches the
+        hard-stop level (15%) or (b) gain falls back to the armed floor. The lock
+        blocks NEW entries for the rest of the UTC day; existing positions are
+        unaffected. State is persisted per-account and reset on the daily reset.
+
+        Args:
+            current_balance: Current account balance.
+
+        Returns:
+            True if NEW entries are currently locked for the day.
+        """
+        self._check_daily_reset(current_balance)
+        if self._daily_start_balance <= 0:
+            return False
+
+        # Already locked for today → stays locked (sticky until the daily reset).
+        if self.database.get_state('profit_lock_triggered') == 'true':
+            return True
+
+        gain = self.daily_gain_pct(current_balance)
+
+        # Hard stop: stop new entries immediately for the rest of the day.
+        if gain >= self.settings.daily_profit_hard_stop_pct:
+            self.database.set_state('profit_lock_triggered', 'true')
+            self.database.set_state('profit_lock_reason', 'hard_stop')
+            logger.warning(
+                'DAILY PROFIT HARD STOP: gain=%.2f%% >= %.2f%% — no new entries '
+                'for the rest of the day (existing positions still managed).',
+                gain * 100, self.settings.daily_profit_hard_stop_pct * 100,
+            )
+            return True
+
+        # Ratchet the armed floor UP (never down) as gain crosses each tier.
+        prev_floor = float(self.database.get_state('profit_lock_floor') or 0.0)
+        floor = prev_floor
+        for tier in self.settings.daily_profit_lock_tiers:
+            if gain >= tier['gain'] and tier['floor'] > floor:
+                floor = tier['floor']
+        if floor > prev_floor:
+            self.database.set_state('profit_lock_floor', str(floor))
+            logger.info(
+                'DAILY PROFIT FLOOR ARMED: gain=%.2f%% → floor=%.2f%% '
+                '(locks new entries if gain falls back to the floor).',
+                gain * 100, floor * 100,
+            )
+
+        # If a floor is armed and gain has fallen back to it → lock.
+        if floor > 0.0 and gain <= floor:
+            self.database.set_state('profit_lock_triggered', 'true')
+            self.database.set_state('profit_lock_reason', 'floor')
+            logger.warning(
+                'DAILY PROFIT LOCK: gain=%.2f%% fell to floor=%.2f%% — locking in '
+                'profit, no new entries for the rest of the day.',
+                gain * 100, floor * 100,
+            )
+            return True
+
+        return False
+
+    def check_daily_profit_lock(self, current_balance: float) -> bool:
+        """True if the daily profit lock blocks NEW entries (also updates state)."""
+        return self.update_daily_profit_lock(current_balance)
+
+    def _reset_daily_profit_lock(self) -> None:
+        """Clear the per-account daily profit-lock state (new UTC day)."""
+        self.database.set_state('profit_lock_floor', '0')
+        self.database.set_state('profit_lock_triggered', 'false')
+        self.database.set_state('profit_lock_reason', '')
+
+    # ───────────────────────────────────────────
+    # Loss-Streak Pause (per-account, persisted)
+    # ───────────────────────────────────────────
+
+    def record_basket_result(self, pnl: float) -> None:
+        """Record a closed-basket outcome for loss-streak tracking.
+
+        A losing basket (pnl < 0) increments the consecutive-loss counter; any
+        winning/break-even basket resets it to zero. On reaching the configured
+        threshold, a timed new-entry pause is armed (persisted, auto-expiring).
+
+        Args:
+            pnl: Realized PnL of the closed basket (USDT).
+        """
+        if pnl < 0:
+            count = self._loss_streak_count() + 1
+            self.database.set_state('loss_streak_count', str(count))
+            if count >= self.settings.loss_streak_threshold:
+                until = time.time() + self.settings.loss_streak_pause_seconds
+                self.database.set_state('loss_streak_pause_until', str(until))
+                # Reset the counter so a fresh streak is required after the pause.
+                self.database.set_state('loss_streak_count', '0')
+                logger.warning(
+                    'LOSS-STREAK PAUSE: %d consecutive losing baskets — pausing '
+                    'new entries for %d min (existing positions still managed).',
+                    count, self.settings.loss_streak_pause_seconds // 60,
+                )
+        elif self._loss_streak_count() != 0:
+            self.database.set_state('loss_streak_count', '0')
+
+    def _loss_streak_count(self) -> int:
+        """Current consecutive-loss count (0 if unset/invalid)."""
+        try:
+            return int(float(self.database.get_state('loss_streak_count') or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def loss_streak_pause_remaining(self) -> float:
+        """Seconds remaining on the loss-streak pause (0 if not paused)."""
+        raw = self.database.get_state('loss_streak_pause_until')
+        if not raw:
+            return 0.0
+        try:
+            until = float(raw)
+        except (TypeError, ValueError):
+            return 0.0
+        remaining = until - time.time()
+        return remaining if remaining > 0 else 0.0
+
+    def is_loss_streak_paused(self) -> bool:
+        """True if a loss-streak pause is currently active (auto-expires)."""
+        if self.loss_streak_pause_remaining() > 0:
+            return True
+        # Clear an expired marker so it doesn't linger in the state store.
+        if self.database.get_state('loss_streak_pause_until') not in (None, '', '0'):
+            self.database.set_state('loss_streak_pause_until', '0')
+        return False
+
+    # ───────────────────────────────────────────
     # Emergency Shutdown
     # ───────────────────────────────────────────
 
@@ -315,6 +496,8 @@ class RiskManager:
             self._daily_start_balance = current_balance
             self.database.set_state('daily_start_balance', str(current_balance))
             self.database.set_state('daily_start_date', today)
+            # New UTC day → reset the daily profit trailing lock for this account.
+            self._reset_daily_profit_lock()
             logger.info(
                 'Daily reset: new start balance=%.2f for %s',
                 current_balance, today,

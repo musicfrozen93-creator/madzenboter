@@ -16,13 +16,13 @@ logger = logging.getLogger(__name__)
 class PositionSizer:
     """Calculates position size (margin and quantity) for new entries.
 
-    Fixed, account-independent sizing (consistent participation):
-      • First-layer (base) margin is a fixed $2.00 (basket_layer_margins_usd[0]),
-        identical for every account regardless of balance or volatility.
-      • Every basket is hard-capped at a fixed $5.00 total margin across all
-        recovery layers (max_basket_margin_usd) — no basket can exceed it.
+    Balance-tier fixed sizing (standardized per account tier, not % of balance):
+      • First-layer (base) margin is the account TIER's Layer-1 margin
+        ($1.50 / $2.50 / $3.50 for Tier A / B / C), independent of volatility.
+      • Every basket is hard-capped at the tier's total-margin cap
+        ($2.50 / $3.50 / $4.50) across both layers — no basket can exceed it.
       • evaluate_entry() additionally rejects symbols whose smallest valid order
-        (min-notional / min-lot) would breach the $5 cap, or whose leverage
+        (min-notional / min-lot) would breach the tier cap, or whose leverage
         would place liquidation too close.
     """
 
@@ -34,27 +34,27 @@ class PositionSizer:
     ) -> float:
         """Calculate base (first-layer) margin for a new position.
 
-        Fixed, account-independent sizing: Layer 1 always targets the configured
-        absolute margin (`basket_layer_margins_usd[0]`, default $2.00), identical
-        across every account regardless of balance or volatility. Clamped to the
-        dust floor and the $5 per-basket hard cap.
+        Balance-tier fixed sizing: Layer 1 targets the account TIER's Layer-1
+        margin ($1.50 Tier A / $2.50 Tier B / $3.50 Tier C), independent of
+        volatility. Clamped to the dust floor and the tier's per-basket hard cap.
 
         Args:
-            balance: Current account balance in USDT (unused; sizing is fixed).
-            volatility: Current volatility classification (unused; sizing is fixed).
+            balance: Current account balance in USDT (selects the sizing tier).
+            volatility: Current volatility classification (unused; sizing is fixed
+                per tier).
 
         Returns:
             Base (Layer 1) margin amount in USDT.
         """
-        base = self.settings.get_layer_margin(1)
+        base = self.settings.get_layer_margin(1, balance)
 
-        # Dust floor and absolute per-basket hard cap.
+        # Dust floor and the tier's per-basket hard cap.
         base = max(self.settings.min_margin_floor, base)
         base = min(base, self.settings.get_margin_hard_cap(balance))
 
         logger.debug(
-            'Position size (fixed): L1 margin=%.4f hard_cap=%.2f',
-            base, self.settings.get_margin_hard_cap(balance),
+            'Position size (tier): L1 margin=%.4f hard_cap=%.2f balance=%.2f',
+            base, self.settings.get_margin_hard_cap(balance), balance,
         )
         return round(base, 4)
 

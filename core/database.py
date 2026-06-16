@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Generator, List, Optional
 
-from sqlalchemy import create_engine, or_, text
+from sqlalchemy import create_engine, exists, or_, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from core.dto import Basket, CoinScore, RecoveryLayer, TradeRecord
@@ -482,6 +482,39 @@ class Database:
             return (
                 session.query(AccountModel)
                 .filter(AccountModel.is_active.is_(True))
+                .order_by(AccountModel.id)
+                .all()
+            )
+
+    def get_managed_accounts(self) -> List[AccountModel]:
+        """Fetch accounts whose baskets must be actively managed.
+
+        An account is managed when EITHER:
+          • it is enabled (is_active = True), OR
+          • it has at least one active basket (open position that needs TP/SL/
+            recovery management even though the subscription has since expired
+            and the web has set is_active = False).
+
+        This guarantees that open positions are always monitored until they
+        close naturally — regardless of subscription state — while preventing
+        the bot from opening new positions for ineligible accounts (which is
+        enforced separately by get_account_eligibility() in execute_signal).
+
+        Returns:
+            List of AccountModel ORM instances, ordered by id.
+        """
+        with self.session() as session:
+            return (
+                session.query(AccountModel)
+                .filter(
+                    or_(
+                        AccountModel.is_active.is_(True),
+                        exists().where(
+                            (BasketModel.account_id == AccountModel.id)
+                            & (BasketModel.status == 'active')
+                        ),
+                    )
+                )
                 .order_by(AccountModel.id)
                 .all()
             )

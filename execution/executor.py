@@ -319,23 +319,29 @@ class SignalExecutor:
             )
 
     def manage_all_accounts(self) -> None:
-        """Manage baskets/positions across all active accounts CONCURRENTLY.
+        """Manage baskets/positions across all managed accounts CONCURRENTLY.
 
         Exit handling (TP/SL/profit-protection/emergency) runs here. Accounts are
         processed in parallel on a thread pool so that when several accounts need
         to close at once, later accounts are NOT delayed behind earlier ones.
+
+        "Managed" means: enabled (is_active) OR currently holding an open basket.
+        This ensures that when a subscription expires and the web sets is_active=False,
+        any open positions are still monitored for TP/SL/recovery until they close
+        naturally. New entries are blocked separately by the eligibility check in
+        execute_signal(), so there is no risk of opening positions for expired accounts.
         """
-        active_accounts = self.account_manager.get_active_accounts()
-        if not active_accounts:
+        managed_accounts = self.db.get_managed_accounts()
+        if not managed_accounts:
             return
 
-        # Forget components for accounts that are no longer active.
-        self._prune_component_cache({a.id for a in active_accounts})
+        # Forget components for accounts that are no longer managed.
+        self._prune_component_cache({a.id for a in managed_accounts})
 
         with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
             futures = [
                 executor.submit(self._manage_account_baskets, account)
-                for account in active_accounts
+                for account in managed_accounts
             ]
             for future in as_completed(futures):
                 try:

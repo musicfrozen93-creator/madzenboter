@@ -49,6 +49,7 @@ class PositionManager:
         tp_manager: TakeProfitManager,
         sl_manager: StopLossManager,
         signal_engine: SignalEngine,
+        bot_control=None,
     ) -> None:
         self.exchange = exchange_client
         self.settings = settings
@@ -59,6 +60,8 @@ class PositionManager:
         self.tp_manager = tp_manager
         self.sl_manager = sl_manager
         self.signal_engine = signal_engine
+        # BotControl reference (optional — None-safe guards throughout).
+        self.bot_control = bot_control
 
         # ── Double-close guard ──
         # Tracks basket IDs whose close is in flight so a basket can never be
@@ -79,6 +82,9 @@ class PositionManager:
         Performs full pre-trade validation via risk manager,
         sets leverage and margin mode, then places the market order.
 
+        CONTROL GATE: returns None immediately if bot_control.can_open_trades()
+        is False (covers BOT_ENABLED=false, EMERGENCY_STOP, FORCE_CLOSE_ALL).
+
         Args:
             signal: Entry signal from signal engine.
             balance: Current account balance.
@@ -86,6 +92,18 @@ class PositionManager:
         Returns:
             New Basket if successful, None if blocked or failed.
         """
+        # ── BOT_CONTROL gate ──
+        if self.bot_control and not self.bot_control.can_open_trades():
+            logger.info(
+                'SIGNAL_BLOCKED %s — bot disabled by BOT_CONTROL '
+                '(bot_enabled=%s emergency_stop=%s force_close_all=%s)',
+                signal.symbol,
+                self.bot_control.bot_enabled,
+                self.bot_control.emergency_stop,
+                self.bot_control.force_close_all,
+            )
+            return None
+
         try:
             vol = VolatilityLevel(signal.volatility)
         except ValueError:
@@ -673,12 +691,31 @@ class PositionManager:
     ) -> None:
         """Add a recovery layer to an existing basket.
 
+        CONTROL GATE: blocked when bot_control.can_add_recovery_layer() is
+        False.  This requires BOTH bot_enabled=True AND
+        manage_existing_positions=True, with no emergency_stop or
+        force_close_all override.  Recovery layers are new exchange orders;
+        blocking them here is the single, authoritative enforcement point.
+
         Args:
             basket: The basket to add a layer to.
             layer_number: The layer number to add (2, 3, or 4).
             balance: Current account balance.
             current_price: Current market price.
         """
+        # ── BOT_CONTROL gate (recovery layers) ──
+        if self.bot_control and not self.bot_control.can_add_recovery_layer():
+            logger.info(
+                '[CONTROL] Recovery L%d blocked for %s — '
+                'bot_enabled=%s manage_existing=%s emergency_stop=%s force_close_all=%s',
+                layer_number, basket.symbol,
+                self.bot_control.bot_enabled,
+                self.bot_control.manage_existing_positions,
+                self.bot_control.emergency_stop,
+                self.bot_control.force_close_all,
+            )
+            return
+
         try:
             vol = VolatilityLevel(basket.volatility)
         except ValueError:

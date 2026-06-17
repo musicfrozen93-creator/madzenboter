@@ -22,6 +22,7 @@ from logging.handlers import RotatingFileHandler
 from typing import List
 
 from config.settings import Settings
+from control.bot_control import BotControl
 from core.database import Database
 from core.dto import CoinScore
 from exchange.client import ExchangeClient
@@ -80,6 +81,10 @@ class TradingEngine:
         self._signal_executor = None
         self._sync_service = None
         self._api_thread = None
+
+        # Centralized bot control (reads BOT_ENABLED, MANAGE_EXISTING_POSITIONS,
+        # FORCE_CLOSE_ALL from env vars; overridable via admin API at runtime).
+        self.bot_control = BotControl()
 
         # Setup logging first
         self._setup_logging()
@@ -142,6 +147,7 @@ class TradingEngine:
                 account_manager=self._account_manager,
                 encryption=self._encryption,
                 master_settings=self.settings,
+                bot_control=self.bot_control,
             )
             self._sync_service = SyncService(
                 db=self.database,
@@ -246,6 +252,18 @@ class TradingEngine:
         acct_handler.setFormatter(logging.Formatter(log_format, date_format))
         acct_logger.addHandler(acct_handler)
 
+        # control.log — dedicated [CONTROL] plane events (bot start/stop,
+        # emergency stop, force-close, position management toggles).
+        # Propagation is kept True so events also appear in bot.log.
+        control_log_handler = RotatingFileHandler(
+            'logs/control.log', maxBytes=5 * 1024 * 1024, backupCount=10,
+            encoding='utf-8',
+        )
+        control_log_handler.setLevel(logging.INFO)
+        control_log_handler.addFilter(account_filter)
+        control_log_handler.setFormatter(logging.Formatter(log_format, date_format))
+        logging.getLogger('zentry.control').addHandler(control_log_handler)
+
     # ───────────────────────────────────────────
     # Lifecycle
     # ───────────────────────────────────────────
@@ -342,14 +360,26 @@ class TradingEngine:
                 # new entries, so this runs first and on every loop iteration —
                 # never starved by, or waiting behind, the signal phase below.
                 # Accounts are managed concurrently inside the executor.
+                #
+                # CONTROL GATE: manage_existing_positions=False → skip management
+                # (monitoring-only mode). TP/SL still run when True.
                 if trading:
-                    try:
-                        self._signal_executor.manage_all_accounts()
-                    except Exception as e:
-                        logger.error('Per-account basket management error: %s', e)
+                    if self.bot_control.can_manage_positions():
+                        try:
+                            self._signal_executor.manage_all_accounts()
+                        except Exception as e:
+                            logger.error('Per-account basket management error: %s', e)
+                    else:
+                        logger.debug(
+                            '[CONTROL] Position management disabled — monitoring only'
+                        )
 
                 # ── 2. Coin scanner (public market data, at scan interval) ──
-                if time.time() - self._last_scan_time >= self.settings.scan_interval_seconds:
+                # CONTROL GATE: scanner only runs when bot_enabled=True and no
+                # emergency_stop / force_close_all override is active.
+                can_scan = self.bot_control.can_open_trades()
+                self.bot_control.set_scanner_running(can_scan and trading)
+                if can_scan and time.time() - self._last_scan_time >= self.settings.scan_interval_seconds:
                     try:
                         self._watchlist = self.scanner.scan()
                         self._last_scan_time = time.time()
@@ -359,6 +389,8 @@ class TradingEngine:
                         logger.info('WATCHLIST | %d symbols: %s', len(self._watchlist), wl)
                     except Exception as e:
                         logger.error('Scan failed: %s', e)
+                elif not can_scan:
+                    self._last_scan_time = 0.0  # Reset so scan fires immediately when re-enabled
 
                 # ── 3. If account trading is disabled, scan only — never trade. ──
                 if not trading:
@@ -372,7 +404,12 @@ class TradingEngine:
                 # phase. It is throttled to signal_eval_interval_seconds so the
                 # exit cycle above keeps running on the tight loop cadence and is
                 # never delayed waiting for scanning of new opportunities.
-                if time.time() - self._last_signal_eval >= self.settings.signal_eval_interval_seconds:
+                #
+                # CONTROL GATE: signals only when bot fully enabled.
+                if (
+                    self.bot_control.can_open_trades()
+                    and time.time() - self._last_signal_eval >= self.settings.signal_eval_interval_seconds
+                ):
                     self._last_signal_eval = time.time()
                     self._evaluate_signals()
 
@@ -463,6 +500,8 @@ class TradingEngine:
             app = create_app(
                 database=self.database,
                 admin_api_key=self.settings.admin_api_key,
+                bot_control=self.bot_control,
+                signal_executor=self._signal_executor,
             )
             config = uvicorn.Config(
                 app,

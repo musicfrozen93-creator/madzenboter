@@ -6,11 +6,26 @@ CLI interface for live trading and maintenance commands.
 Usage:
     python main.py --mode live          # Live trading (testnet by default)
     python main.py --clear-shutdown     # Clear emergency shutdown flag
+
+Environment variables:
+    Loaded from a `.env` file in the working directory (if present), then from
+    the system environment. System variables always take precedence over .env.
+    See .env.example for all supported variables including BOT_ENABLED,
+    MANAGE_EXISTING_POSITIONS, FORCE_CLOSE_ALL, and EMERGENCY_STOP.
 """
 
 import argparse
 import logging
 import sys
+
+# Load .env FIRST — before any os.environ.get() calls in Settings or BotControl.
+# System environment variables always win (override=False is the dotenv default).
+# If no .env file exists, this is a silent no-op.
+try:
+    from dotenv import load_dotenv
+    load_dotenv(override=False)
+except ImportError:
+    pass  # python-dotenv not installed; rely on system env vars only
 
 from config.settings import Settings
 from core.database import Database
@@ -57,6 +72,8 @@ Examples:
     args = parser.parse_args()
 
     # ── Load settings ──
+    # NOTE: load_dotenv() was already called at module import time (top of file),
+    # so all .env variables are in os.environ before Settings.load() reads them.
     try:
         settings = Settings.load(args.config)
     except FileNotFoundError:

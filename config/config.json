@@ -1,0 +1,57 @@
+{
+    "use_testnet": false,
+
+    "supported_symbols": ["TRX/USDT:USDT", "XRP/USDT:USDT", "XLM/USDT:USDT"],
+    "btc_symbol": "BTC/USDT:USDT",
+
+    "timeframe": "15m",
+    "candle_limit": 300,
+
+    "loop_interval_seconds": 10,
+    "signal_eval_interval_seconds": 30,
+
+    "rsi_period": 14,
+    "rsi_oversold": 30.0,
+    "rsi_overbought": 70.0,
+    "bb_period": 20,
+    "bb_std": 2.0,
+    "atr_period": 14,
+
+    "btc_filter_enabled": true,
+    "btc_ema_fast": 50,
+    "btc_ema_slow": 200,
+    "btc_regime_cache_seconds": 300,
+
+    "default_leverage": 5,
+    "min_leverage": 3,
+    "max_leverage": 8,
+    "hard_max_leverage": 10,
+
+    "layer1_margin_usd": 5.0,
+    "layer2_margin_multiplier": 2.0,
+    "min_notional_floor": 5.0,
+
+    "recovery_max_layers": 2,
+    "layer2_atr_multiplier": 2.0,
+
+    "basket_tp_layer1_usd": 0.50,
+    "basket_tp_recovery_usd": 1.75,
+
+    "max_baskets_per_account": 2,
+    "max_basket_per_symbol": 1,
+    "daily_profit_target_usd": 5.0,
+    "daily_loss_limit_usd": 3.0,
+
+    "risk_filter_lookback": 30,
+    "max_spread_pct": 0.0010,
+    "atr_explosion_multiplier": 2.5,
+    "news_candle_atr_multiplier": 2.5,
+    "volume_spike_multiplier": 3.0,
+
+    "symbol_cooldown_seconds": 900,
+
+    "taker_fee_pct": 0.0004,
+
+    "database_url": "postgresql://trading_bot:trading_bot@localhost:5432/trading_bot",
+    "log_level": "INFO"
+}

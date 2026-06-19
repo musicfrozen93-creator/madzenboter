@@ -137,6 +137,56 @@ class SignalEngine:
         return None
 
     # ───────────────────────────────────────────
+    # Correlation-protection signal-strength score (0–4)
+    # ───────────────────────────────────────────
+
+    def _strength_score(
+        self, df, side, rsi, price, candle_low, candle_high,
+        bb_lower, bb_upper, btc_regime, spread,
+    ):
+        """Score the setup 0–4 for the correlation second-symbol rule.
+
+        +1 RSI extreme (< 20 or > 80)
+        +1 strong Bollinger penetration (the CLOSE pierces the band, not just a wick)
+        +1 BTC trend strongly aligned with the trade direction
+        +1 good spread AND liquidity (tight spread + healthy volume)
+        """
+        s = self.settings
+        parts = []
+        score = 0
+
+        # 1) Extreme RSI
+        if rsi < 20 or rsi > 80:
+            score += 1
+            parts.append('rsi_extreme')
+
+        # 2) Strong Bollinger penetration — close beyond the band
+        if (side == 'long' and price <= bb_lower) or (side == 'short' and price >= bb_upper):
+            score += 1
+            parts.append('bb_penetration')
+
+        # 3) BTC strongly aligned
+        if (side == 'long' and btc_regime == BtcRegime.BULLISH) or \
+           (side == 'short' and btc_regime == BtcRegime.BEARISH):
+            score += 1
+            parts.append('btc_aligned')
+
+        # 4) Good spread AND liquidity
+        spread_pct = (spread / price) if price > 0 else 1.0
+        lookback = max(5, s.risk_filter_lookback)
+        good_liquidity = False
+        if 'volume' in df.columns and len(df) >= lookback + 1:
+            recent = df['volume'].iloc[-(lookback + 1):-1]
+            avg_vol = float(recent.mean()) if not recent.empty else 0.0
+            last_vol = float(df['volume'].iloc[-1])
+            good_liquidity = avg_vol > 0 and last_vol >= avg_vol
+        if spread_pct < (s.max_spread_pct * 0.5) and good_liquidity:
+            score += 1
+            parts.append('spread_liquidity')
+
+        return score, ','.join(parts) if parts else 'none'
+
+    # ───────────────────────────────────────────
     # Signal generation
     # ───────────────────────────────────────────
 
@@ -260,6 +310,12 @@ class SignalEngine:
             strength = max(0.1, min(1.0, strength))
             vol_label = 'high' if latest_atr > 0 and (latest_atr / current_price) > 0.01 else 'normal'
 
+            # ── Correlation-protection signal-strength score (0–4) ──
+            score, score_parts = self._strength_score(
+                df, side, latest_rsi, current_price, candle_low, candle_high,
+                bb_lower, bb_upper, btc_regime, spread,
+            )
+
             signal = Signal(
                 symbol=symbol,
                 side=side,
@@ -273,14 +329,15 @@ class SignalEngine:
                 bb_lower=bb_lower,
                 bb_upper=bb_upper,
                 reason=reason,
+                strength_score=score,
                 timestamp=time.time(),
             )
 
             logger.info(
                 'SIGNAL_FOUND | symbol=%s direction=%s rsi=%.1f price=%.6f atr=%.6f '
-                'btc=%s strength=%.2f | reason: %s',
+                'btc=%s score=%d/4 [%s] strength=%.2f | reason: %s',
                 symbol, side.upper(), latest_rsi, current_price, latest_atr,
-                btc_regime.value.upper(), strength, reason,
+                btc_regime.value.upper(), score, score_parts, strength, reason,
             )
             return signal
 

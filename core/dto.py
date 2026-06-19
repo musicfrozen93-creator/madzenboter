@@ -148,6 +148,7 @@ class Signal:
     bb_lower: float = 0.0
     bb_upper: float = 0.0
     reason: str = ''  # human-readable reason for entry
+    strength_score: int = 0  # correlation-protection score (0–4)
     timestamp: float = field(default_factory=time.time)
 
 

@@ -114,14 +114,15 @@ class Settings:
     # BTC candles for every symbol evaluated within a loop.
     btc_regime_cache_seconds: int = 300
 
-    # ── Leverage (default 5x; admin may override 3x–8x; NEVER exceed 10x) ──
-    default_leverage: int = 5
-    min_leverage: int = 3
-    max_leverage: int = 8
+    # ── Leverage (default 8x; admin may override 5x–10x; NEVER exceed 10x) ──
+    # Fixed leverage — never dynamically adjusted, never balance-scaled.
+    default_leverage: int = 8
+    min_leverage: int = 5
+    max_leverage: int = 10
     hard_max_leverage: int = 10
     # Resolved leverage actually used by an account (set per-account by
     # create_account_settings; defaults to default_leverage for the master).
-    leverage: int = 5
+    leverage: int = 8
 
     # ── Account tiers (FIXED sizing — balance ONLY selects the tier) ──
     # Exactly two tiers. Balance is evaluated solely to pick a tier; once a
@@ -130,8 +131,8 @@ class Settings:
     # changes such as deposits/withdrawals). There is no balance scaling, no
     # percentage sizing, no dynamic/adaptive/volatility sizing, no martingale.
     #
-    #   Tier 1  ($20–$39.99)  L1 $2  L2 $4   cap $6   TP $0.50/$1.50  daily ±$3
-    #   Tier 2  ($40+)        L1 $4  L2 $8   cap $12  TP $0.80/$2.00  daily ±$4
+    #   Tier 1 ($20–$39.99) L1 $2 L2 $4 cap $6  daily ±$3  2 sym/4 pos  death <$15
+    #   Tier 2 ($40+)       L1 $4 L2 $8 cap $12 daily ±$4  3 sym/6 pos  death <$30
     min_tier_balance: float = 20.0
     account_tiers: list = field(
         default_factory=lambda: [
@@ -141,6 +142,8 @@ class Settings:
                 'max_basket_exposure': 6.0,
                 'basket_tp_l1': 0.50, 'basket_tp_l2': 1.50,
                 'daily_profit_target': 3.0, 'daily_loss_limit': 3.0,
+                'max_active_symbols': 2, 'max_positions': 4,
+                'protection_floor': 15.0,
             },
             {
                 'id': 'tier2', 'max_balance': float('inf'),
@@ -148,6 +151,8 @@ class Settings:
                 'max_basket_exposure': 12.0,
                 'basket_tp_l1': 0.80, 'basket_tp_l2': 2.00,
                 'daily_profit_target': 4.0, 'daily_loss_limit': 4.0,
+                'max_active_symbols': 3, 'max_positions': 6,
+                'protection_floor': 30.0,
             },
         ]
     )
@@ -161,10 +166,15 @@ class Settings:
     # Volatility-adjusted spacing — NOT fixed grid spacing.
     layer2_atr_multiplier: float = 2.0
 
-    # ── Position limits ──
-    max_baskets_per_account: int = 2        # max simultaneous symbols/baskets
+    # ── Position limits (max active symbols / total positions are PER-TIER) ──
     max_basket_per_symbol: int = 1          # never two baskets on one symbol
-    max_total_open_positions: int = 4       # 2 baskets × 2 layers
+
+    # ── Correlation protection (TRX/XRP/XLM treated as correlated assets) ──
+    # A new basket needs a minimum signal-strength score (0–4) that rises with
+    # the number of already-open correlated baskets:
+    #   0 active → score >= 2,   1+ active → score >= 3.
+    correlation_min_score_first: int = 2
+    correlation_min_score_additional: int = 3
 
     # ── Pre-trade risk-rule skip filters (skip the trade if ANY trips) ──
     risk_filter_lookback: int = 30          # bars for ATR/volume averages
@@ -349,8 +359,17 @@ class Settings:
                 issues.append(f'{tid}: basket_tp_l2 must exceed basket_tp_l1')
             if tier.get('daily_profit_target', 0) <= 0 or tier.get('daily_loss_limit', 0) <= 0:
                 issues.append(f'{tid}: daily targets must be > 0')
-        if self.max_baskets_per_account < 1:
-            issues.append('max_baskets_per_account must be >= 1')
+            if tier.get('max_active_symbols', 0) < 1:
+                issues.append(f'{tid}: max_active_symbols must be >= 1')
+            # Max positions should allow each symbol's basket to reach 2 layers.
+            if tier.get('max_positions', 0) < tier.get('max_active_symbols', 0) * self.recovery_max_layers:
+                issues.append(f'{tid}: max_positions must be >= max_active_symbols × max layers')
+            if tier.get('protection_floor', 0) <= 0:
+                issues.append(f'{tid}: protection_floor must be > 0')
+            if tier.get('protection_floor', 0) >= tier.get('max_balance', float('inf')) and tier['max_balance'] != float('inf'):
+                issues.append(f'{tid}: protection_floor should be below the tier ceiling')
+        if self.correlation_min_score_additional < self.correlation_min_score_first:
+            issues.append('correlation_min_score_additional must be >= correlation_min_score_first')
         if self.bb_period < 2:
             issues.append('bb_period must be >= 2')
 

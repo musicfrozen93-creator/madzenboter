@@ -99,11 +99,12 @@ def _pm(settings: Settings, balance: float, filled_ratio: float = 1.0):
     return pm, ex, db
 
 
-def _signal(side='long') -> Signal:
+def _signal(side='long', strength_score=4, symbol=SYMBOL) -> Signal:
     return Signal(
-        symbol=SYMBOL, side=side, strength=0.8, atr=0.001, market_regime='neutral',
+        symbol=symbol, side=side, strength=0.8, atr=0.001, market_regime='neutral',
         volatility='normal', current_price=PRICE, ema200=PRICE, rsi=25.0,
         bb_lower=PRICE, bb_upper=PRICE + 0.01, reason='test entry',
+        strength_score=strength_score,
     )
 
 
@@ -170,12 +171,69 @@ def test_partial_fill_sizes_basket_to_actual(settings: Settings):
     pm, ex, db = _pm(settings, balance=25.0, filled_ratio=0.5)
     basket = pm.open_position(_signal(), balance=25.0)
     assert basket is not None
-    # Tier 1 L1 intends qty 100 @ 0.10 ($2 margin); half fills → qty 50, $1 margin.
-    assert basket.layers[0].quantity == 50.0
-    assert basket.layers[0].margin == 1.0           # 50 × 0.10 / 5 = $1 actual
+    # Tier 1 L1 ($2) at 8x / $0.10 intends qty 160; half fills → qty 80, $1 margin.
+    assert basket.layers[0].quantity == 80.0
+    assert basket.layers[0].margin == 1.0           # 80 × 0.10 / 8 = $1 actual
 
 
 def test_zero_fill_rejects_basket(settings: Settings):
     pm, ex, db = _pm(settings, balance=25.0, filled_ratio=0.0)
     assert pm.open_position(_signal(), balance=25.0) is None
     assert db.baskets == []                          # nothing persisted on no-fill
+
+
+# ── Correlation protection (second-symbol rule) ──
+
+def test_first_basket_needs_score_two(settings: Settings):
+    pm, ex, db = _pm(settings, balance=50.0)
+    assert pm.open_position(_signal(strength_score=1), balance=50.0) is None   # too weak
+    assert db.baskets == []
+    assert pm.open_position(_signal(strength_score=2), balance=50.0) is not None  # ok
+
+
+def test_second_correlated_basket_needs_score_three(settings: Settings):
+    pm, ex, db = _pm(settings, balance=50.0)        # Tier 2: up to 3 symbols
+    assert pm.open_position(_signal(strength_score=2, symbol='TRX/USDT:USDT'), balance=50.0)
+    # A second correlated basket with only score 2 is rejected (needs 3).
+    assert pm.open_position(_signal(strength_score=2, symbol='XRP/USDT:USDT'), balance=50.0) is None
+    # Score 3 is accepted.
+    assert pm.open_position(_signal(strength_score=3, symbol='XRP/USDT:USDT'), balance=50.0)
+
+
+# ── Tier-based position limits ──
+
+def test_tier1_caps_at_two_symbols(settings: Settings):
+    pm, ex, db = _pm(settings, balance=25.0)        # Tier 1: max 2 symbols
+    assert pm.open_position(_signal(symbol='TRX/USDT:USDT'), balance=25.0)
+    assert pm.open_position(_signal(symbol='XRP/USDT:USDT'), balance=25.0)
+    # Third symbol is rejected by the tier's max_active_symbols (2).
+    assert pm.open_position(_signal(symbol='XLM/USDT:USDT'), balance=25.0) is None
+
+
+def test_tier2_allows_three_symbols(settings: Settings):
+    pm, ex, db = _pm(settings, balance=50.0)        # Tier 2: max 3 symbols
+    assert pm.open_position(_signal(symbol='TRX/USDT:USDT'), balance=50.0)
+    assert pm.open_position(_signal(symbol='XRP/USDT:USDT'), balance=50.0)
+    assert pm.open_position(_signal(symbol='XLM/USDT:USDT'), balance=50.0)
+    assert len([b for b in db.baskets if b.status == 'active']) == 3
+
+
+# ── Account death protection ──
+
+def test_open_blocked_when_balance_below_protection_floor(settings: Settings):
+    # Balance $14 → below the Tier-1 floor ($15): protection lock latches at open.
+    pm, ex, db = _pm(settings, balance=14.0)
+    assert pm.open_position(_signal(), balance=14.0) is None
+    # $14 is also below min_tier_balance ($20), so no tier — either way, no trade.
+    assert db.baskets == []
+
+
+def test_manage_triggers_protection_and_closes_all(settings: Settings):
+    pm, ex, db = _pm(settings, balance=25.0)
+    basket = pm.open_position(_signal(), balance=25.0)
+    assert basket is not None
+    # Price collapse pushes equity below the $15 floor → protection lock + close-all.
+    ex.price = 0.06
+    pm.manage_baskets([basket], balance=10.0)
+    assert pm.risk_manager.is_protection_locked()
+    assert all(b.status != 'active' for b in db.baskets)

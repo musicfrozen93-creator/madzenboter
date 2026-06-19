@@ -9,14 +9,18 @@ Orchestrates the full lifecycle of a recovery basket for ONE account:
   • close_basket    — close an entire basket together (idempotent, reduce-only)
 
 Hard rules enforced here:
-  • Only the supported symbols are traded.
-  • At most max_baskets_per_account simultaneous baskets (default 2).
+  • Only the supported (correlated) symbols are traded.
+  • Per-tier max active symbols (Tier 1: 2, Tier 2: 3) and max positions.
   • At most ONE basket per symbol.
   • At most 2 layers per basket (Layer 1 + ONE recovery) — never a martingale.
-  • Daily loss limit closes ALL baskets; daily profit target blocks NEW entries.
+  • Correlation protection: a new correlated basket needs a stronger signal score
+    the more baskets are already open (0 → score>=2, 1+ → score>=3).
+  • Account death protection: equity below the tier floor PERMANENTLY locks the
+    account and closes all baskets. Daily loss closes ALL baskets; daily profit
+    blocks NEW entries.
 
-Every entry/skip/recovery/close is logged with the account id, symbol, direction,
-entry price, recovery layer, and the reason.
+Every entry/skip/recovery/close is logged with the account id, tier, symbol,
+direction, entry price, recovery layer, margin, basket PnL, and the reason.
 """
 
 import logging
@@ -108,11 +112,12 @@ class PositionManager:
             return None
 
         # ── [1] lock status + [2] daily profit + [3] daily loss (PER-ACCOUNT) ──
-        # Refresh the latches from realised PnL first, so a realised breach is
-        # caught even when the management loop hasn't run (e.g. all baskets are
-        # already closed). Floating PnL is handled by manage_baskets; passing 0
-        # here can only fail to latch, never falsely latch. These locks are this
-        # account's alone — never global — and persist in the DB until UTC reset.
+        # Refresh the latches from realised PnL / wallet equity first, so a
+        # realised breach is caught even when the management loop hasn't run
+        # (e.g. all baskets are already closed). Floating PnL is handled by
+        # manage_baskets; passing 0 here can only fail to latch, never falsely
+        # latch. These locks are this account's alone — never global.
+        self.risk_manager.check_account_death_protection(balance, tier)
         self.risk_manager.check_loss_limit(0.0, tier)
         self.risk_manager.update_profit_target(0.0, tier)
         allowed, reason = self.risk_manager.can_take_new_entry()
@@ -128,23 +133,40 @@ class PositionManager:
             )
             return None
 
-        # ── Structural limits (one per symbol, max baskets, max positions) ──
+        # ── Structural limits (PER-TIER: max active symbols, max positions) ──
         active_baskets = self.database.load_active_baskets()
         if any(b.symbol == symbol for b in active_baskets):
             self._skip(symbol, signal.side, 'existing_basket_on_symbol', tier=tier['id'])
             return None
-        if len(active_baskets) >= self.settings.max_baskets_per_account:
+        max_symbols = tier['max_active_symbols']
+        if len(active_baskets) >= max_symbols:
             self._skip(
                 symbol, signal.side,
-                f'max_baskets_reached ({len(active_baskets)}/{self.settings.max_baskets_per_account})',
+                f'max_active_symbols ({len(active_baskets)}/{max_symbols})',
                 tier=tier['id'],
             )
             return None
         open_positions = sum(b.layer_count for b in active_baskets)
-        if open_positions >= self.settings.max_total_open_positions:
+        if open_positions >= tier['max_positions']:
             self._skip(
                 symbol, signal.side,
-                f'max_total_open_positions ({open_positions}/{self.settings.max_total_open_positions})',
+                f'max_positions ({open_positions}/{tier["max_positions"]})',
+                tier=tier['id'],
+            )
+            return None
+
+        # ── Correlation protection (TRX/XRP/XLM are correlated) ──
+        # A new correlated basket needs a stronger signal the more baskets are
+        # already open: 0 active → score >= 2, 1+ active → score >= 3.
+        required_score = (
+            self.settings.correlation_min_score_first if not active_baskets
+            else self.settings.correlation_min_score_additional
+        )
+        if signal.strength_score < required_score:
+            self._skip(
+                symbol, signal.side,
+                f'correlation_protection (score {signal.strength_score} < required '
+                f'{required_score} with {len(active_baskets)} active basket(s))',
                 tier=tier['id'],
             )
             return None
@@ -239,6 +261,8 @@ class PositionManager:
         """Manage all active baskets for the account.
 
         Order of priority (survival first):
+          0. Account death protection → equity below the tier floor permanently
+             PROTECTION_LOCKS the account and closes ALL baskets.
           1. Daily loss limit  → close ALL baskets, stop for the day.
           2. Basket take-profit → close the basket at its USDT target.
           3. Recovery layer     → activate Layer 2 when ATR-spacing is hit.
@@ -269,6 +293,16 @@ class PositionManager:
             price = prices.get(basket.symbol)
             if price:
                 total_unrealized += basket.unrealized_pnl(price)
+
+        # ── PRIORITY 0: account death protection (PERMANENT lock) ──
+        # Equity = wallet balance + open floating PnL (the account's real value).
+        # If it falls below the tier floor ($15 Tier 1 / $30 Tier 2) the account
+        # is PROTECTION_LOCKED permanently (admin reset only) and every basket is
+        # closed immediately. This is survival-first and outranks all else.
+        equity = balance + total_unrealized
+        if self.risk_manager.check_account_death_protection(equity, tier):
+            self.close_all_baskets(active, 'protection_lock')
+            return []
 
         # ── PRIORITY 1: daily loss limit (close ALL baskets + recovery layers) ──
         # Uses realised + unrealised trading PnL (never wallet balance) so it

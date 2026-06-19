@@ -119,10 +119,14 @@ class RiskManager:
     def can_take_new_entry(self) -> Tuple[bool, str]:
         """Gate for opening a NEW basket (this account only; never global).
 
-        Checked in the documented order: account lock status → daily profit
-        limit → daily loss limit. Existing baskets are unaffected. All lock state
-        is per-account and persisted, so it survives restarts until the UTC reset.
+        Checked in the documented order: account lock status (PROTECTION lock,
+        then emergency) → daily profit limit → daily loss limit. Existing baskets
+        are unaffected. All lock state is per-account and persisted, so it
+        survives restarts. PROTECTION lock is PERMANENT (admin reset only); the
+        daily locks clear on the next UTC reset.
         """
+        if self.is_protection_locked():
+            return False, 'PROTECTION_LOCKED (account death protection — manual admin reset required)'
         if self.is_emergency_shutdown():
             return False, 'emergency shutdown active'
         if self._locked('daily_profit_locked'):
@@ -177,6 +181,48 @@ class RiskManager:
 
     def is_daily_profit_locked(self) -> bool:
         return self._locked('daily_profit_locked')
+
+    # ───────────────────────────────────────────
+    # Account death protection (PERMANENT, admin reset only)
+    # ───────────────────────────────────────────
+
+    def is_protection_locked(self) -> bool:
+        """True if the account is PROTECTION_LOCKED (permanent until admin reset)."""
+        return self._locked('protection_locked')
+
+    def check_account_death_protection(self, equity: float, tier: dict) -> bool:
+        """Latch the PROTECTION lock if account equity falls below the tier floor.
+
+        Equity = wallet balance + open floating PnL (the account's real value).
+        Tier 1 floor $15, Tier 2 floor $30. Once tripped the lock is PERMANENT
+        (it is NOT cleared by the UTC-day reset) and only an admin can remove it.
+        Returns True if the account is protection-locked (now or already).
+
+        Args:
+            equity: Account equity (wallet balance + unrealised PnL).
+            tier: The account's current tier config.
+        """
+        if self.is_protection_locked():
+            return True
+        floor = tier.get('protection_floor', 0.0)
+        if floor > 0 and equity < floor:
+            self.database.set_state('protection_locked', 'true')
+            self.database.set_state('protection_locked_reason',
+                                    f'equity {equity:.2f} < {tier["id"]} floor {floor:.2f}')
+            self.database.set_state('protection_locked_time', str(time.time()))
+            logger.critical(
+                'PROTECTION_LOCKED | %s | equity=%.2f < floor=%.2f — closing ALL '
+                'baskets and DISABLING trading permanently (manual admin reset required).',
+                tier['id'], equity, floor,
+            )
+            return True
+        return False
+
+    def clear_protection_lock(self) -> None:
+        """Remove the PROTECTION lock — ADMIN ONLY (manual maintenance action)."""
+        self.database.set_state('protection_locked', 'false')
+        self.database.set_state('protection_locked_reason', '')
+        logger.warning('PROTECTION_LOCK cleared by admin')
 
     # ───────────────────────────────────────────
     # Emergency shutdown (risk-tracking framework)

@@ -83,6 +83,9 @@ sizing, no dynamic/adaptive/volatility sizing, no martingale.
 | Basket TP (Layer 1 + 2) | $1.50 | $2.00 |
 | Daily profit target | $3 | $4 |
 | Daily loss limit | $3 | $4 |
+| Max active symbols | 2 | 3 |
+| Max positions | 4 | 6 |
+| Death-protection floor (equity) | $15 | $30 |
 
 Balances below $20 have no tier and do not trade.
 
@@ -90,17 +93,36 @@ Balances below $20 have no tier and do not trade.
 
 | Rule | Value |
 |------|-------|
-| Leverage (default / admin override / never exceed) | 5× / 3×–8× / 10× |
-| Max active symbols / baskets per account | 2 |
+| Leverage (default / admin override / never exceed) | 8× / 5×–10× / 10× |
+| Max active symbols | 2 (Tier 1) / 3 (Tier 2) |
+| Max positions | 4 (Tier 1) / 6 (Tier 2) |
 | Max basket per symbol | 1 |
 | Max layers per basket | 2 |
-| Max total open positions | 4 (2 baskets × 2 layers) |
 | Same-symbol cooldown after a close | 15 min |
 | Daily profit target | stop new trades until next UTC day |
 | Daily loss limit | close all baskets immediately, lock until next UTC day |
 
-The only honoured per-account override is the admin leverage setting. All sizing,
-exposure caps, TP targets, and daily limits are tier-fixed.
+Leverage is fixed (never dynamically adjusted, never balance-scaled). The only
+honoured per-account override is the admin leverage setting. All sizing, exposure
+caps, TP targets, daily limits, and position limits are tier-fixed.
+
+### Account death protection (PROTECTION_LOCKED)
+
+If account **equity** (wallet balance + open floating PnL) falls below the tier
+floor — **$15 (Tier 1)** or **$30 (Tier 2)** — the account is **permanently**
+PROTECTION_LOCKED: all baskets are closed immediately and trading is disabled
+until an admin manually resets it. The lock is stored in the database and
+survives bot/server restart and crashes (it is **not** cleared by the UTC-day
+reset). Admin reset: `python main.py --clear-protection <ACCOUNT_ID>`.
+
+### Correlation protection
+
+TRX/XRP/XLM are treated as **correlated** assets. Each signal gets a
+**strength score (0–4)**: +1 extreme RSI (<20 / >80), +1 strong Bollinger
+penetration, +1 BTC trend strongly aligned, +1 good spread & liquidity. A new
+basket needs a higher score the more correlated baskets are already open —
+**0 open → score ≥ 2**, **1+ open → score ≥ 3** — and is rejected once the tier's
+max active symbols is reached.
 
 ### Daily PnL & deposit/transfer protection
 
@@ -223,17 +245,18 @@ Key values:
 |-----------|---------|---------|
 | `supported_symbols` | TRX/XRP/XLM | the only tradeable pairs |
 | `timeframe` | `15m` | candle interval |
-| `default_leverage` / `min` / `max` / `hard_max` | 5 / 3 / 8 / 10 | leverage policy |
+| `default_leverage` / `min` / `max` / `hard_max` | 8 / 5 / 10 / 10 | leverage policy |
 | `min_tier_balance` | 20.0 | below this → no tier, no trading |
-| `account_tiers` | tier1 / tier2 | per-tier margins, exposure caps, TP targets, daily limits |
+| `account_tiers` | tier1 / tier2 | per-tier sizing, caps, TP, daily limits, position limits, death floor |
 | `layer2_atr_multiplier` | 2.0 | Layer-2 distance = ATR×2 |
-| `max_baskets_per_account` | 2 | max simultaneous baskets |
-| `max_total_open_positions` | 4 | 2 baskets × 2 layers |
+| `correlation_min_score_first` / `_additional` | 2 / 3 | min signal score for 0 / 1+ active baskets |
+| `max_basket_per_symbol` | 1 | never two baskets on one symbol |
 | `symbol_cooldown_seconds` | 900 | 15-min same-symbol cooldown after a close |
 
 Per-tier values (`layer1_margin`, `layer2_margin`, `max_basket_exposure`,
-`basket_tp_l1`, `basket_tp_l2`, `daily_profit_target`, `daily_loss_limit`) live
-inside `account_tiers` — see the Account Tier System table above.
+`basket_tp_l1`, `basket_tp_l2`, `daily_profit_target`, `daily_loss_limit`,
+`max_active_symbols`, `max_positions`, `protection_floor`) live inside
+`account_tiers` — see the Account Tier System table above.
 
 ---
 

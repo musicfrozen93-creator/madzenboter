@@ -100,3 +100,57 @@ def test_daily_pnl_ignores_wallet_balance(settings: Settings, fake_db):
     assert rm.daily_trading_pnl(-1.0) == -2.0
     # A "deposit" (balance change) is irrelevant — no balance is read here.
     assert rm.daily_trading_pnl(-1.0) == -2.0
+
+
+# ── Account death protection (PROTECTION_LOCKED) ──
+
+def test_death_protection_latches_below_tier1_floor(settings: Settings, fake_db):
+    tier1 = settings.get_tier(25.0)               # floor $15
+    rm = _rm(settings, fake_db, balance=25.0)
+    assert rm.check_account_death_protection(14.0, tier1) is True
+    assert rm.is_protection_locked()
+    allowed, reason = rm.can_take_new_entry()
+    assert not allowed and 'PROTECTION_LOCKED' in reason
+
+
+def test_death_protection_not_triggered_above_floor(settings: Settings, fake_db):
+    tier1 = settings.get_tier(25.0)
+    rm = _rm(settings, fake_db, balance=25.0)
+    assert rm.check_account_death_protection(16.0, tier1) is False
+    assert not rm.is_protection_locked()
+
+
+def test_death_protection_tier2_floor(settings: Settings, fake_db):
+    tier2 = settings.get_tier(50.0)               # floor $30
+    rm = _rm(settings, fake_db, balance=50.0)
+    assert rm.check_account_death_protection(31.0, tier2) is False
+    assert rm.check_account_death_protection(29.0, tier2) is True
+
+
+def test_protection_lock_survives_utc_reset(settings: Settings, fake_db):
+    tier1 = settings.get_tier(25.0)
+    rm = _rm(settings, fake_db, balance=25.0)
+    rm.check_account_death_protection(14.0, tier1)
+    assert rm.is_protection_locked()
+    # Force a new UTC day: daily locks clear, but the PROTECTION lock is PERMANENT.
+    fake_db.store['daily_start_date'] = '2000-01-01'
+    rm_new_day = _rm(settings, fake_db, balance=25.0)
+    assert rm_new_day.is_protection_locked()
+    assert rm_new_day.can_take_new_entry()[0] is False
+
+
+def test_protection_lock_persists_across_restart(settings: Settings, fake_db):
+    tier1 = settings.get_tier(25.0)
+    _rm(settings, fake_db, balance=25.0).check_account_death_protection(10.0, tier1)
+    # Fresh RiskManager over the same store (a "restart") — lock still set.
+    rm2 = _rm(settings, fake_db, balance=25.0)
+    assert rm2.is_protection_locked()
+
+
+def test_admin_can_clear_protection_lock(settings: Settings, fake_db):
+    tier1 = settings.get_tier(25.0)
+    rm = _rm(settings, fake_db, balance=25.0)
+    rm.check_account_death_protection(14.0, tier1)
+    assert rm.can_take_new_entry()[0] is False
+    rm.clear_protection_lock()                    # ADMIN action
+    assert rm.can_take_new_entry()[0] is True

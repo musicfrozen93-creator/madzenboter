@@ -22,9 +22,9 @@
     "btc_ema_slow": 200,
     "btc_regime_cache_seconds": 300,
 
-    "default_leverage": 5,
-    "min_leverage": 3,
-    "max_leverage": 8,
+    "default_leverage": 8,
+    "min_leverage": 5,
+    "max_leverage": 10,
     "hard_max_leverage": 10,
 
     "min_tier_balance": 20.0,
@@ -34,14 +34,18 @@
             "layer1_margin": 2.0, "layer2_margin": 4.0,
             "max_basket_exposure": 6.0,
             "basket_tp_l1": 0.50, "basket_tp_l2": 1.50,
-            "daily_profit_target": 3.0, "daily_loss_limit": 3.0
+            "daily_profit_target": 3.0, "daily_loss_limit": 3.0,
+            "max_active_symbols": 2, "max_positions": 4,
+            "protection_floor": 15.0
         },
         {
             "id": "tier2", "max_balance": 999999999,
             "layer1_margin": 4.0, "layer2_margin": 8.0,
             "max_basket_exposure": 12.0,
             "basket_tp_l1": 0.80, "basket_tp_l2": 2.00,
-            "daily_profit_target": 4.0, "daily_loss_limit": 4.0
+            "daily_profit_target": 4.0, "daily_loss_limit": 4.0,
+            "max_active_symbols": 3, "max_positions": 6,
+            "protection_floor": 30.0
         }
     ],
     "min_notional_floor": 5.0,
@@ -49,9 +53,9 @@
     "recovery_max_layers": 2,
     "layer2_atr_multiplier": 2.0,
 
-    "max_baskets_per_account": 2,
     "max_basket_per_symbol": 1,
-    "max_total_open_positions": 4,
+    "correlation_min_score_first": 2,
+    "correlation_min_score_additional": 3,
 
     "risk_filter_lookback": 30,
     "max_spread_pct": 0.0010,

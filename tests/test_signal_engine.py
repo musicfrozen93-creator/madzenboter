@@ -101,6 +101,16 @@ def test_long_signal_with_bullish_btc(settings: Settings):
     assert sig.reason
 
 
+def test_signal_strength_score_is_scored(settings: Settings):
+    # Strong oversold long under a bullish BTC: extreme RSI (<20) + BTC aligned +
+    # good spread/liquidity ⇒ score >= 3 (capped at 4). Always within 0–4.
+    eng = SignalEngine(FakeExchange(_oversold_long_df(), _btc_uptrend()), settings)
+    sig = eng.generate_signal(SYMBOL)
+    assert sig is not None
+    assert 0 <= sig.strength_score <= 4
+    assert sig.strength_score >= 3
+
+
 def test_long_blocked_by_bearish_btc(settings: Settings):
     # BTC bearish blocks LONG entries.
     eng = SignalEngine(FakeExchange(_oversold_long_df(), _btc_downtrend()), settings)

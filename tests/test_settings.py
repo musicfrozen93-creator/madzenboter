@@ -17,14 +17,15 @@ def test_timeframe_is_15m(settings: Settings):
 
 
 def test_default_and_override_leverage(settings: Settings):
-    assert settings.default_leverage == 5
+    assert settings.default_leverage == 8
     # Master settings always run at default leverage.
-    assert settings.leverage == 5
-    # Admin override clamps into [3, 8] and never above the hard cap (10).
-    assert Settings.create_account_settings(settings, {'leverage_override': 8}).leverage == 8
-    assert Settings.create_account_settings(settings, {'leverage_override': 12}).leverage == 8
-    assert Settings.create_account_settings(settings, {'leverage_override': 1}).leverage == 3
-    assert Settings.create_account_settings(settings, {'leverage_override': None}).leverage == 5
+    assert settings.leverage == 8
+    # Admin override clamps into [5, 10] and never above the hard cap (10).
+    assert Settings.create_account_settings(settings, {'leverage_override': 7}).leverage == 7
+    assert Settings.create_account_settings(settings, {'leverage_override': 10}).leverage == 10
+    assert Settings.create_account_settings(settings, {'leverage_override': 12}).leverage == 10
+    assert Settings.create_account_settings(settings, {'leverage_override': 3}).leverage == 5
+    assert Settings.create_account_settings(settings, {'leverage_override': None}).leverage == 8
 
 
 def test_never_exceeds_hard_max_leverage(settings: Settings):
@@ -84,10 +85,21 @@ def test_max_two_layers(settings: Settings):
     assert settings.recovery_max_layers == 2
 
 
-def test_position_limits(settings: Settings):
-    assert settings.max_baskets_per_account == 2
+def test_position_limits_are_per_tier(settings: Settings):
     assert settings.max_basket_per_symbol == 1
-    assert settings.max_total_open_positions == 4
+    t1, t2 = settings.get_tier(25.0), settings.get_tier(50.0)
+    assert t1['max_active_symbols'] == 2 and t1['max_positions'] == 4
+    assert t2['max_active_symbols'] == 3 and t2['max_positions'] == 6
+
+
+def test_protection_floors(settings: Settings):
+    assert settings.get_tier(25.0)['protection_floor'] == 15.0
+    assert settings.get_tier(50.0)['protection_floor'] == 30.0
+
+
+def test_correlation_min_scores(settings: Settings):
+    assert settings.correlation_min_score_first == 2
+    assert settings.correlation_min_score_additional == 3
 
 
 def test_validate_clean(settings: Settings):

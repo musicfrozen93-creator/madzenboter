@@ -65,6 +65,10 @@ Examples:
         help='Clear emergency shutdown flag and exit',
     )
     parser.add_argument(
+        '--clear-protection', type=int, metavar='ACCOUNT_ID', default=None,
+        help='ADMIN: clear the PROTECTION_LOCKED death-protection lock for an account and exit',
+    )
+    parser.add_argument(
         '--api', action='store_true',
         help='Start the Admin REST API server in a background thread',
     )
@@ -92,6 +96,18 @@ Examples:
         db.set_state('emergency_shutdown_reason', '')
         db.set_state('emergency_shutdown_critical', 'false')
         print('✓ Emergency shutdown cleared. You can restart the bot.')
+        db.close()
+        return
+
+    # ── Clear per-account PROTECTION lock (ADMIN, manual reset) ──
+    if args.clear_protection is not None:
+        account_id = args.clear_protection
+        db = Database(settings.database_url)
+        db.initialize()
+        # PROTECTION lock state is account-namespaced (account_<id>_protection_locked).
+        db.set_state(f'account_{account_id}_protection_locked', 'false')
+        db.set_state(f'account_{account_id}_protection_locked_reason', '')
+        print(f'✓ PROTECTION lock cleared for account {account_id}. Trading may resume.')
         db.close()
         return
 

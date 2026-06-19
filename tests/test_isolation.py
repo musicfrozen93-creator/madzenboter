@@ -93,6 +93,20 @@ def test_lock_persists_across_restart(settings: Settings):
     assert rm_restarted.can_take_new_entry()[0] is False  # lock survived
 
 
+def test_protection_lock_is_account_specific(settings: Settings):
+    db = SharedDB()
+    tier = settings.get_tier(25.0)
+    rm_a = _rm(settings, db, account_id=1)
+    rm_b = _rm(settings, db, account_id=2)
+
+    # Account A's equity collapses below the death-protection floor.
+    assert rm_a.check_account_death_protection(10.0, tier) is True
+    assert rm_a.can_take_new_entry()[0] is False         # A PROTECTION_LOCKED
+    assert rm_b.can_take_new_entry()[0] is True           # B unaffected
+    assert db.state.get('account_1_protection_locked') == 'true'
+    assert db.state.get('account_2_protection_locked') != 'true'
+
+
 def test_lock_clears_on_new_utc_day(settings: Settings):
     db = SharedDB()
     tier = settings.get_tier(25.0)

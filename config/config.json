@@ -27,20 +27,31 @@
     "max_leverage": 8,
     "hard_max_leverage": 10,
 
-    "layer1_margin_usd": 5.0,
-    "layer2_margin_multiplier": 2.0,
+    "min_tier_balance": 20.0,
+    "account_tiers": [
+        {
+            "id": "tier1", "max_balance": 40.0,
+            "layer1_margin": 2.0, "layer2_margin": 4.0,
+            "max_basket_exposure": 6.0,
+            "basket_tp_l1": 0.50, "basket_tp_l2": 1.50,
+            "daily_profit_target": 3.0, "daily_loss_limit": 3.0
+        },
+        {
+            "id": "tier2", "max_balance": 999999999,
+            "layer1_margin": 4.0, "layer2_margin": 8.0,
+            "max_basket_exposure": 12.0,
+            "basket_tp_l1": 0.80, "basket_tp_l2": 2.00,
+            "daily_profit_target": 4.0, "daily_loss_limit": 4.0
+        }
+    ],
     "min_notional_floor": 5.0,
 
     "recovery_max_layers": 2,
     "layer2_atr_multiplier": 2.0,
 
-    "basket_tp_layer1_usd": 0.50,
-    "basket_tp_recovery_usd": 1.75,
-
     "max_baskets_per_account": 2,
     "max_basket_per_symbol": 1,
-    "daily_profit_target_usd": 5.0,
-    "daily_loss_limit_usd": 3.0,
+    "max_total_open_positions": 4,
 
     "risk_filter_lookback": 30,
     "max_spread_pct": 0.0010,

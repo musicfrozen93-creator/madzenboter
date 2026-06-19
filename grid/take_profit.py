@@ -2,12 +2,11 @@
 ZenGrid — Basket Take-Profit Manager.
 
 The basket is the unit of profit-taking. The entire basket is closed together
-when its NET profit (unrealised PnL minus estimated round-trip fees) reaches a
-fixed USDT target:
+when its NET profit (unrealised PnL minus estimated round-trip fees) reaches the
+TIER-SPECIFIC USDT target read from the basket's locked tier:
 
-  Layer 1 only          → ≈ $0.50
-  Layer 1 + Layer 2     → ≈ $1.50–$2.00 (recalculated once the recovery layer
-                          activates)
+  Tier 1   Layer 1 only → $0.50    Layer 1 + Layer 2 → $1.50
+  Tier 2   Layer 1 only → $0.80    Layer 1 + Layer 2 → $2.00
 
 There is no per-layer take-profit, no ROI-percentage target, and no trailing
 profit lock — the basket closes as a whole at the dollar target.
@@ -22,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 class TakeProfitManager:
-    """Fixed-dollar basket take-profit."""
+    """Fixed-dollar, tier-specific basket take-profit."""
 
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -34,13 +33,23 @@ class TakeProfitManager:
             return 0.0
         return qty * current_price * self.settings.taker_fee_pct * 2
 
+    def _basket_tier(self, basket: Basket) -> dict:
+        """Return the basket's LOCKED tier (stored in basket.volatility)."""
+        return (
+            self.settings.get_tier_by_id(basket.volatility)
+            or self.settings.account_tiers[0]
+        )
+
     def target_usd(self, basket: Basket) -> float:
         """The net USDT profit target that closes this basket.
 
-        Recalculated from the live layer count, so once Layer 2 activates the
-        target automatically becomes the recovery target ($1.50–$2.00).
+        Read from the basket's LOCKED tier and the live layer count, so once the
+        recovery layer activates the target becomes the tier's recovery target.
         """
-        return self.settings.basket_tp_target_usd(basket.layer_count)
+        tier = self._basket_tier(basket)
+        if basket.layer_count >= 2:
+            return float(tier['basket_tp_l2'])
+        return float(tier['basket_tp_l1'])
 
     def check_basket_tp(self, basket: Basket, current_price: float) -> bool:
         """True if the basket's net profit has reached its USDT target."""

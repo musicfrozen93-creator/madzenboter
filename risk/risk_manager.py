@@ -91,7 +91,11 @@ class RiskManager:
     # ───────────────────────────────────────────
 
     def daily_realized_pnl(self) -> float:
-        """Sum of today's closed-basket PnL for this account (USDT)."""
+        """Sum of today's closed-basket PnL for this account (USDT).
+
+        Derived ONLY from trade history (closed baskets) — never from wallet
+        balance, so deposits/withdrawals/transfers can never move it.
+        """
         try:
             trades = self.database.get_today_trades()
             return float(sum(t.pnl for t in trades))
@@ -99,59 +103,71 @@ class RiskManager:
             logger.debug('daily_realized_pnl failed: %s', e)
             return 0.0
 
+    def daily_trading_pnl(self, open_unrealized: float) -> float:
+        """Total daily TRADING PnL = realised (closed) + unrealised (open).
+
+        This is the ONLY basis for the daily profit/loss limits. It excludes all
+        wallet-balance changes (deposits, withdrawals, funding/spot transfers,
+        internal Binance transfers, manual adjustments) by construction.
+        """
+        return self.daily_realized_pnl() + open_unrealized
+
     # ───────────────────────────────────────────
     # New-entry gate (profit target + loss lock)
     # ───────────────────────────────────────────
 
     def can_take_new_entry(self) -> Tuple[bool, str]:
-        """Gate for opening a NEW basket. Existing baskets are unaffected."""
+        """Gate for opening a NEW basket (this account only; never global).
+
+        Checked in the documented order: account lock status → daily profit
+        limit → daily loss limit. Existing baskets are unaffected. All lock state
+        is per-account and persisted, so it survives restarts until the UTC reset.
+        """
         if self.is_emergency_shutdown():
             return False, 'emergency shutdown active'
-        if self._locked('daily_loss_locked'):
-            return False, (
-                f'daily loss limit (${self.settings.daily_loss_limit_usd:.2f}) reached '
-                f'— no new trades until next UTC day'
-            )
         if self._locked('daily_profit_locked'):
-            return False, (
-                f'daily profit target (${self.settings.daily_profit_target_usd:.2f}) reached '
-                f'— no new trades until next UTC day'
-            )
+            return False, 'daily profit target reached — no new trades until next UTC day'
+        if self._locked('daily_loss_locked'):
+            return False, 'daily loss limit reached — no new trades until next UTC day'
         return True, 'OK'
 
-    def update_profit_target(self) -> bool:
-        """Latch the profit lock once realised daily PnL reaches the target.
+    def update_profit_target(self, open_unrealized: float, tier: dict) -> bool:
+        """Latch the profit lock once daily TRADING PnL reaches the tier target.
 
-        Returns True if NEW entries are now locked for the day.
+        Uses realised + unrealised PnL (never wallet balance). Returns True if
+        NEW entries are now locked for the day.
         """
         if self._locked('daily_profit_locked'):
             return True
-        realized = self.daily_realized_pnl()
-        if realized >= self.settings.daily_profit_target_usd:
+        total = self.daily_trading_pnl(open_unrealized)
+        target = tier['daily_profit_target']
+        if total >= target:
             self.database.set_state('daily_profit_locked', 'true')
             logger.info(
-                'DAILY_PROFIT_TARGET | realised=%.4f >= target=%.2f — no new trades '
-                'for the rest of the UTC day (existing baskets still managed).',
-                realized, self.settings.daily_profit_target_usd,
+                'DAILY_PROFIT_TARGET | %s | trading_pnl=%.4f >= target=%.2f — no new '
+                'trades for the rest of the UTC day (existing baskets still managed).',
+                tier['id'], total, target,
             )
             return True
         return False
 
-    def check_loss_limit(self, open_unrealized: float) -> bool:
+    def check_loss_limit(self, open_unrealized: float, tier: dict) -> bool:
         """Check the daily loss limit against realised + open unrealised PnL.
 
-        Returns True when the limit is breached (caller must close all baskets).
-        Once breached the lock is latched for the rest of the UTC day.
+        Returns True when the tier limit is breached (caller must close ALL
+        baskets and recovery layers immediately — do not wait for losses to be
+        realised). Once breached the lock is latched for the rest of the UTC day.
         """
         if self._locked('daily_loss_locked'):
             return True
-        total = self.daily_realized_pnl() + open_unrealized
-        if total <= -self.settings.daily_loss_limit_usd:
+        total = self.daily_trading_pnl(open_unrealized)
+        limit = tier['daily_loss_limit']
+        if total <= -limit:
             self.database.set_state('daily_loss_locked', 'true')
             logger.warning(
-                'DAILY_LOSS_LIMIT | total=%.4f <= -%.2f (realised + open) — closing '
-                'ALL baskets and stopping trading until next UTC day.',
-                total, self.settings.daily_loss_limit_usd,
+                'DAILY_LOSS_LIMIT | %s | trading_pnl=%.4f <= -%.2f (realised + open) '
+                '— closing ALL baskets and locking the account until next UTC day.',
+                tier['id'], total, limit,
             )
             return True
         return False

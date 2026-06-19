@@ -32,34 +32,62 @@ def test_never_exceeds_hard_max_leverage(settings: Settings):
     assert settings.clamp_leverage(999) == 10
 
 
-def test_fixed_layer_margins(settings: Settings):
-    # Layer 2 is exactly 2x Layer 1 (the single recovery layer).
-    l1 = settings.get_layer_margin(1)
-    l2 = settings.get_layer_margin(2)
-    assert l1 == settings.layer1_margin_usd
-    assert l2 == l1 * settings.layer2_margin_multiplier
-    # Sizing must NOT depend on balance — there is no balance parameter at all.
+def test_exactly_two_tiers(settings: Settings):
+    assert len(settings.account_tiers) == 2
+    assert [t['id'] for t in settings.account_tiers] == ['tier1', 'tier2']
 
 
-def test_basket_tp_targets(settings: Settings):
-    # Layer 1 only -> ~$0.50; with the recovery layer -> ~$1.50-$2.00.
-    assert settings.basket_tp_target_usd(1) == settings.basket_tp_layer1_usd
-    assert settings.basket_tp_target_usd(2) == settings.basket_tp_recovery_usd
-    assert 1.50 <= settings.basket_tp_recovery_usd <= 2.00
+def test_tier_boundaries(settings: Settings):
+    # Below the minimum → no tier (must not trade).
+    assert settings.get_tier(19.99) is None
+    # 20–39.99 → Tier 1; 40+ → Tier 2.
+    assert settings.get_tier(20.0)['id'] == 'tier1'
+    assert settings.get_tier(39.99)['id'] == 'tier1'
+    assert settings.get_tier(40.0)['id'] == 'tier2'
+    assert settings.get_tier(100.0)['id'] == 'tier2'
+
+
+def test_tier1_config(settings: Settings):
+    t = settings.get_tier(25.0)
+    assert t['layer1_margin'] == 2.0
+    assert t['layer2_margin'] == 4.0
+    assert t['max_basket_exposure'] == 6.0
+    assert t['basket_tp_l1'] == 0.50
+    assert t['basket_tp_l2'] == 1.50
+    assert t['daily_profit_target'] == 3.0
+    assert t['daily_loss_limit'] == 3.0
+
+
+def test_tier2_config(settings: Settings):
+    t = settings.get_tier(50.0)
+    assert t['layer1_margin'] == 4.0
+    assert t['layer2_margin'] == 8.0
+    assert t['max_basket_exposure'] == 12.0
+    assert t['basket_tp_l1'] == 0.80
+    assert t['basket_tp_l2'] == 2.00
+    assert t['daily_profit_target'] == 4.0
+    assert t['daily_loss_limit'] == 4.0
+
+
+def test_tier_layers_fit_exposure(settings: Settings):
+    # L1 + L2 must equal the tier's max basket exposure (never exceed it).
+    for t in settings.account_tiers:
+        assert t['layer1_margin'] + t['layer2_margin'] == t['max_basket_exposure']
+
+
+def test_tier_or_default_below_minimum(settings: Settings):
+    # Managing existing baskets below the min uses the most conservative tier.
+    assert settings.get_tier_or_default(10.0)['id'] == 'tier1'
 
 
 def test_max_two_layers(settings: Settings):
     assert settings.recovery_max_layers == 2
 
 
-def test_daily_limits(settings: Settings):
-    assert settings.daily_profit_target_usd == 5.0
-    assert settings.daily_loss_limit_usd == 3.0
-
-
-def test_max_two_baskets(settings: Settings):
+def test_position_limits(settings: Settings):
     assert settings.max_baskets_per_account == 2
     assert settings.max_basket_per_symbol == 1
+    assert settings.max_total_open_positions == 4
 
 
 def test_validate_clean(settings: Settings):

@@ -74,10 +74,20 @@ class PositionManager:
     # ───────────────────────────────────────────
 
     def open_position(self, signal: Signal, balance: float) -> Optional[Basket]:
-        """Open a new basket (Layer 1) from an approved entry signal."""
+        """Open a new basket (Layer 1) from an approved entry signal.
+
+        Entry validation runs in a strict order (all PER-ACCOUNT, never global):
+          1. account lock status (emergency)        ┐ can_take_new_entry()
+          2. daily profit limit                     │  (latches refreshed from
+          3. daily loss limit                       ┘  realised PnL first)
+          4. cooldown status
+          (5. BTC filter and 6. signal validity already ran upstream in the
+           SignalEngine before this approved signal was fanned out)
+          7. structural limits + exchange-safety sizing, then execute.
+        """
         symbol = signal.symbol
 
-        # ── BOT_CONTROL gate ──
+        # ── BOT_CONTROL gate (admin control plane — separate from risk locks) ──
         if self.bot_control and not self.bot_control.can_open_trades():
             self._skip(symbol, signal.side, 'bot_control_disabled')
             return None
@@ -87,31 +97,56 @@ class PositionManager:
             self._skip(symbol, signal.side, 'unsupported_symbol')
             return None
 
-        # ── Daily profit/loss locks (block NEW entries only) ──
+        # ── Account tier (balance ONLY selects the tier) ──
+        tier = self.settings.get_tier(balance)
+        if tier is None:
+            self._skip(
+                symbol, signal.side,
+                f'balance_below_min_tier (balance={balance:.2f} < '
+                f'{self.settings.min_tier_balance:.2f} USDT)',
+            )
+            return None
+
+        # ── [1] lock status + [2] daily profit + [3] daily loss (PER-ACCOUNT) ──
+        # Refresh the latches from realised PnL first, so a realised breach is
+        # caught even when the management loop hasn't run (e.g. all baskets are
+        # already closed). Floating PnL is handled by manage_baskets; passing 0
+        # here can only fail to latch, never falsely latch. These locks are this
+        # account's alone — never global — and persist in the DB until UTC reset.
+        self.risk_manager.check_loss_limit(0.0, tier)
+        self.risk_manager.update_profit_target(0.0, tier)
         allowed, reason = self.risk_manager.can_take_new_entry()
         if not allowed:
-            self._skip(symbol, signal.side, reason)
+            self._skip(symbol, signal.side, reason, tier=tier['id'])
             return None
 
+        # ── [4] Same-symbol cooldown after a recent close (PER-ACCOUNT) ──
+        remaining_cd = self._cooldown_remaining(symbol)
+        if remaining_cd > 0:
+            self._skip(
+                symbol, signal.side, f'cooldown ({remaining_cd:.0f}s remaining)', tier=tier['id']
+            )
+            return None
+
+        # ── Structural limits (one per symbol, max baskets, max positions) ──
         active_baskets = self.database.load_active_baskets()
-
-        # ── One basket per symbol ──
         if any(b.symbol == symbol for b in active_baskets):
-            self._skip(symbol, signal.side, 'existing_basket_on_symbol')
+            self._skip(symbol, signal.side, 'existing_basket_on_symbol', tier=tier['id'])
             return None
-
-        # ── Max simultaneous baskets ──
         if len(active_baskets) >= self.settings.max_baskets_per_account:
             self._skip(
                 symbol, signal.side,
                 f'max_baskets_reached ({len(active_baskets)}/{self.settings.max_baskets_per_account})',
+                tier=tier['id'],
             )
             return None
-
-        # ── Same-symbol cooldown after a recent close ──
-        remaining_cd = self._cooldown_remaining(symbol)
-        if remaining_cd > 0:
-            self._skip(symbol, signal.side, f'cooldown ({remaining_cd:.0f}s remaining)')
+        open_positions = sum(b.layer_count for b in active_baskets)
+        if open_positions >= self.settings.max_total_open_positions:
+            self._skip(
+                symbol, signal.side,
+                f'max_total_open_positions ({open_positions}/{self.settings.max_total_open_positions})',
+                tier=tier['id'],
+            )
             return None
 
         leverage = self.settings.leverage
@@ -119,18 +154,19 @@ class PositionManager:
         try:
             market_info = self.exchange.get_symbol_info(symbol)
         except Exception as e:
-            self._skip(symbol, signal.side, f'market_info_error ({e})')
+            self._skip(symbol, signal.side, f'market_info_error ({e})', tier=tier['id'])
             return None
 
+        # FIXED Layer-1 margin from the tier (never balance-scaled).
+        margin = tier['layer1_margin']
         plan = self.position_sizer.build_order(
-            1, signal.current_price, leverage, market_info
+            margin, signal.current_price, leverage, market_info
         )
         if not plan['suitable']:
-            self._skip(symbol, signal.side, f"sizing_unsuitable ({plan['reason']})")
+            self._skip(symbol, signal.side, f"sizing_unsuitable ({plan['reason']})", tier=tier['id'])
             return None
 
-        quantity = plan['quantity']
-        margin = plan['margin']
+        quantity = plan['quantity']   # planned qty; actual fill is resolved below
 
         # ── Execute ──
         try:
@@ -139,23 +175,38 @@ class PositionManager:
 
             order_side = 'buy' if signal.side == 'long' else 'sell'
             order = self.exchange.place_market_order(symbol, order_side, quantity)
-            fill_price = float(
-                order.get('average', order.get('price', signal.current_price))
-                or signal.current_price
-            )
+
+            # ── Partial-fill handling — NEVER assume a full fill ──
+            # Use the ACTUAL filled quantity and recompute the ACTUAL margin so
+            # basket TP and exposure are derived from what really filled.
+            fill = self._resolve_fill(order, quantity, signal.current_price, leverage)
+            if fill is None:
+                self._skip(symbol, signal.side, 'no_fill (order returned 0 filled)', tier=tier['id'])
+                return None
+            filled_qty, fill_price, actual_margin = fill
+            if filled_qty + 1e-12 < quantity:
+                logger.warning(
+                    'PARTIAL_FILL | account=%s symbol=%s requested=%.8f filled=%.8f '
+                    'actual_margin=%.4f — basket sized to the actual fill.',
+                    self.account_id, symbol, quantity, filled_qty, actual_margin,
+                    extra=self._log_extra,
+                )
 
             layer = RecoveryLayer(
                 layer_number=1,
                 entry_price=fill_price,
-                margin=margin,
-                quantity=quantity,
+                margin=actual_margin,
+                quantity=filled_qty,
                 side=signal.side,
             )
+            # The tier is LOCKED onto the basket (stored in the volatility column)
+            # so recovery margin, exposure cap, and TP target never change if the
+            # account balance later crosses a tier boundary.
             basket = Basket(
                 symbol=symbol,
                 side=signal.side,
                 atr_at_entry=signal.atr,
-                volatility=signal.volatility,
+                volatility=tier['id'],
                 leverage=leverage,
                 account_id=self.account_id,
             )
@@ -163,11 +214,11 @@ class PositionManager:
             self.database.save_basket(basket)
 
             trade_logger.info(
-                'OPEN | account=%s symbol=%s direction=%s layer=1 entry=%.6f '
-                'qty=%.8f margin=%.4f lev=%dx | reason: %s',
-                self.account_id, symbol, signal.side.upper(), fill_price,
-                quantity, margin, leverage, signal.reason or 'entry signal',
-                extra=self._log_extra,
+                'OPEN | account=%s tier=%s symbol=%s direction=%s layer=1 entry=%.6f '
+                'qty=%.8f margin=%.4f lev=%dx btc=%s basket_pnl=0.0000 | reason: %s',
+                self.account_id, tier['id'], symbol, signal.side.upper(), fill_price,
+                filled_qty, actual_margin, leverage, (signal.market_regime or 'unknown').upper(),
+                signal.reason or 'entry signal', extra=self._log_extra,
             )
             logger.info(
                 'POSITION_OPEN | account=%s symbol=%s direction=%s entry=%.6f basket=%s',
@@ -197,6 +248,10 @@ class PositionManager:
         if not active:
             return []
 
+        # Account tier for daily limits — balance ONLY selects the tier; falls
+        # back to the most conservative tier if balance dipped below the minimum.
+        tier = self.settings.get_tier_or_default(balance)
+
         # ── Price snapshot + total open unrealised PnL ──
         prices: dict = {}
         total_unrealized = 0.0
@@ -215,14 +270,16 @@ class PositionManager:
             if price:
                 total_unrealized += basket.unrealized_pnl(price)
 
-        # ── PRIORITY 1: daily loss limit (close everything) ──
-        if self.risk_manager.check_loss_limit(total_unrealized):
+        # ── PRIORITY 1: daily loss limit (close ALL baskets + recovery layers) ──
+        # Uses realised + unrealised trading PnL (never wallet balance) so it
+        # fires before losses are realised, regardless of deposits/withdrawals.
+        if self.risk_manager.check_loss_limit(total_unrealized, tier):
             self.close_all_baskets(active, 'daily_loss_limit')
             return []
 
         # Latch the daily profit target lock (blocks new entries only).
         try:
-            self.risk_manager.update_profit_target()
+            self.risk_manager.update_profit_target(total_unrealized, tier)
         except Exception as e:
             logger.debug('update_profit_target failed: %s', e)
 
@@ -274,6 +331,21 @@ class PositionManager:
         if next_layer > self.settings.recovery_max_layers:
             return  # never a Layer 3+
 
+        # The basket's LOCKED tier drives recovery margin and the exposure cap.
+        tier = self.settings.get_tier_by_id(basket.volatility) or self.settings.account_tiers[0]
+        margin = tier['layer2_margin']
+
+        # Never exceed the tier's maximum basket exposure.
+        projected = basket.total_margin + margin
+        if projected > tier['max_basket_exposure'] + 1e-9:
+            logger.info(
+                'RECOVERY_SKIP | account=%s tier=%s symbol=%s reason=exposure_cap '
+                '(%.2f + %.2f = %.2f > %.2f)',
+                self.account_id, tier['id'], basket.symbol, basket.total_margin,
+                margin, projected, tier['max_basket_exposure'], extra=self._log_extra,
+            )
+            return
+
         leverage = basket.leverage
         try:
             market_info = self.exchange.get_symbol_info(basket.symbol)
@@ -282,12 +354,13 @@ class PositionManager:
             return
 
         plan = self.position_sizer.build_order(
-            next_layer, current_price, leverage, market_info
+            margin, current_price, leverage, market_info
         )
         if not plan['suitable']:
             logger.warning(
-                'Recovery L%d unsuitable for %s: %s',
-                next_layer, basket.symbol, plan['reason'], extra=self._log_extra,
+                'RECOVERY_SKIP | account=%s tier=%s symbol=%s reason=sizing_unsuitable (%s)',
+                self.account_id, tier['id'], basket.symbol, plan['reason'],
+                extra=self._log_extra,
             )
             return
 
@@ -296,20 +369,38 @@ class PositionManager:
             order = self.exchange.place_market_order(
                 basket.symbol, order_side, plan['quantity']
             )
-            fill_price = float(
-                order.get('average', order.get('price', current_price)) or current_price
-            )
+
+            # ── Partial-fill handling — use the ACTUAL filled qty/margin ──
+            fill = self._resolve_fill(order, plan['quantity'], current_price, leverage)
+            if fill is None:
+                logger.warning(
+                    'RECOVERY_SKIP | account=%s tier=%s symbol=%s reason=no_fill',
+                    self.account_id, tier['id'], basket.symbol, extra=self._log_extra,
+                )
+                return
+            filled_qty, fill_price, actual_margin = fill
+            if filled_qty + 1e-12 < plan['quantity']:
+                logger.warning(
+                    'PARTIAL_FILL | account=%s symbol=%s layer=%d requested=%.8f filled=%.8f '
+                    'actual_margin=%.4f — recovery layer sized to the actual fill.',
+                    self.account_id, basket.symbol, next_layer, plan['quantity'],
+                    filled_qty, actual_margin, extra=self._log_extra,
+                )
+
             layer = self.recovery.build_layer(
-                basket, next_layer, plan['margin'], plan['quantity'], fill_price
+                basket, next_layer, actual_margin, filled_qty, fill_price
             )
             basket.add_layer(layer)
             self.database.update_basket(basket)
 
+            # Basket TP + exposure are recomputed from the ACTUAL layer qty/margin.
+            basket_pnl = basket.unrealized_pnl(current_price)
             trade_logger.info(
-                'RECOVERY | account=%s symbol=%s direction=%s layer=%d entry=%.6f '
-                'qty=%.8f margin=%.4f | reason: Layer 1 drawdown exceeded ATR×%.1f',
-                self.account_id, basket.symbol, basket.side.upper(), next_layer,
-                fill_price, plan['quantity'], plan['margin'],
+                'RECOVERY | account=%s tier=%s symbol=%s direction=%s layer=%d entry=%.6f '
+                'qty=%.8f margin=%.4f basket_pnl=%.4f exposure=%.4f | reason: Layer 1 '
+                'drawdown exceeded ATR×%.1f',
+                self.account_id, tier['id'], basket.symbol, basket.side.upper(), next_layer,
+                fill_price, filled_qty, actual_margin, basket_pnl, basket.total_margin,
                 self.settings.layer2_atr_multiplier, extra=self._log_extra,
             )
         except Exception as e:
@@ -388,11 +479,13 @@ class PositionManager:
             self._finalize_closed_state(basket.symbol, basket.id)
 
             sign = '+' if realized_pnl >= 0 else ''
+            daily_realized = self.risk_manager.daily_realized_pnl()
             trade_logger.info(
-                'CLOSE | account=%s symbol=%s direction=%s layers=%d entry=%.6f '
-                'exit=%.6f pnl=%s%.4f USDT | reason: %s',
-                self.account_id, basket.symbol, basket.side.upper(), trade.layers_used,
-                trade.entry_price, current_price, sign, realized_pnl, reason,
+                'CLOSE | account=%s tier=%s symbol=%s direction=%s layers=%d entry=%.6f '
+                'exit=%.6f basket_pnl=%s%.4f USDT daily_realized=%.4f cooldown=%dm | reason: %s',
+                self.account_id, basket.volatility, basket.symbol, basket.side.upper(),
+                trade.layers_used, trade.entry_price, current_price, sign, realized_pnl,
+                daily_realized, self.settings.symbol_cooldown_seconds // 60, reason,
                 extra=self._log_extra,
             )
             return trade
@@ -485,11 +578,11 @@ class PositionManager:
         except Exception as e:
             logger.error('Failed to start cooldown for %s: %s', symbol, e)
 
-    def _skip(self, symbol: str, side: str, reason: str) -> None:
+    def _skip(self, symbol: str, side: str, reason: str, tier: str = '-') -> None:
         """Log a skipped entry with the required fields."""
         logger.info(
-            'ENTRY_SKIP | account=%s symbol=%s direction=%s reason=%s',
-            self.account_id, symbol, (side or '').upper(), reason,
+            'ENTRY_SKIP | account=%s tier=%s symbol=%s direction=%s reason=%s',
+            self.account_id, tier, symbol, (side or '').upper(), reason,
             extra=self._log_extra,
         )
 
@@ -503,3 +596,36 @@ class PositionManager:
             'quantity less than', 'unknown order sent',
         )
         return any(token in msg for token in benign)
+
+    @staticmethod
+    def _resolve_fill(order: dict, requested_qty: float, fallback_price: float, leverage: int):
+        """Extract the ACTUAL fill from an order — never assume a full fill.
+
+        Reads the truly-filled quantity (ccxt ``filled``, falling back to
+        ``amount``) and the average fill price, then derives the ACTUAL margin
+        consumed (filled × price / leverage). Basket TP and exposure are computed
+        from these actual values, so a partial fill is handled correctly.
+
+        Returns:
+            Tuple (filled_qty, fill_price, actual_margin), or None if nothing
+            filled (filled quantity <= 0).
+        """
+        fill_price = float(
+            order.get('average', order.get('price', fallback_price)) or fallback_price
+        )
+        if fill_price <= 0:
+            fill_price = fallback_price
+
+        raw = order.get('filled')
+        if raw is None:
+            raw = order.get('amount')
+        try:
+            filled = float(raw) if raw is not None else float(requested_qty)
+        except (TypeError, ValueError):
+            filled = float(requested_qty)
+
+        if filled <= 0:
+            return None
+
+        actual_margin = (filled * fill_price / leverage) if leverage > 0 else 0.0
+        return filled, fill_price, round(actual_margin, 6)

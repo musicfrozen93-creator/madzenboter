@@ -26,7 +26,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -123,11 +123,34 @@ class Settings:
     # create_account_settings; defaults to default_leverage for the master).
     leverage: int = 5
 
-    # ── Position sizing (FIXED — identical for every account, NEVER balance-scaled) ──
-    # Layer 1 deploys a fixed margin in USDT. Layer 2 (the single recovery
-    # layer) deploys layer2_margin_multiplier × that margin (2× by default).
-    layer1_margin_usd: float = 5.0
-    layer2_margin_multiplier: float = 2.0
+    # ── Account tiers (FIXED sizing — balance ONLY selects the tier) ──
+    # Exactly two tiers. Balance is evaluated solely to pick a tier; once a
+    # basket is opened its tier is LOCKED (recovery margin, exposure cap, and TP
+    # target all come from the basket's tier — never resized by later balance
+    # changes such as deposits/withdrawals). There is no balance scaling, no
+    # percentage sizing, no dynamic/adaptive/volatility sizing, no martingale.
+    #
+    #   Tier 1  ($20–$39.99)  L1 $2  L2 $4   cap $6   TP $0.50/$1.50  daily ±$3
+    #   Tier 2  ($40+)        L1 $4  L2 $8   cap $12  TP $0.80/$2.00  daily ±$4
+    min_tier_balance: float = 20.0
+    account_tiers: list = field(
+        default_factory=lambda: [
+            {
+                'id': 'tier1', 'max_balance': 40.0,
+                'layer1_margin': 2.0, 'layer2_margin': 4.0,
+                'max_basket_exposure': 6.0,
+                'basket_tp_l1': 0.50, 'basket_tp_l2': 1.50,
+                'daily_profit_target': 3.0, 'daily_loss_limit': 3.0,
+            },
+            {
+                'id': 'tier2', 'max_balance': float('inf'),
+                'layer1_margin': 4.0, 'layer2_margin': 8.0,
+                'max_basket_exposure': 12.0,
+                'basket_tp_l1': 0.80, 'basket_tp_l2': 2.00,
+                'daily_profit_target': 4.0, 'daily_loss_limit': 4.0,
+            },
+        ]
+    )
     # Absolute notional floor — Binance rejects dust orders below ~$5 notional.
     min_notional_floor: float = 5.0
 
@@ -138,17 +161,10 @@ class Settings:
     # Volatility-adjusted spacing — NOT fixed grid spacing.
     layer2_atr_multiplier: float = 2.0
 
-    # ── Basket take-profit (fixed USDT net-profit targets) ──
-    # Layer 1 only          → close the basket at ≈ $0.50 net profit.
-    # Layer 1 + Layer 2     → close the basket at ≈ $1.50–$2.00 net profit.
-    basket_tp_layer1_usd: float = 0.50
-    basket_tp_recovery_usd: float = 1.75   # midpoint of the $1.50–$2.00 band
-
-    # ── Per-account limits ──
+    # ── Position limits ──
     max_baskets_per_account: int = 2        # max simultaneous symbols/baskets
     max_basket_per_symbol: int = 1          # never two baskets on one symbol
-    daily_profit_target_usd: float = 5.0    # stop NEW entries when reached
-    daily_loss_limit_usd: float = 3.0       # close ALL baskets + stop when reached
+    max_total_open_positions: int = 4       # 2 baskets × 2 layers
 
     # ── Pre-trade risk-rule skip filters (skip the trade if ANY trips) ──
     risk_filter_lookback: int = 30          # bars for ATR/volume averages
@@ -201,6 +217,11 @@ class Settings:
         raw['admin_api_port'] = int(
             os.environ.get('ADMIN_API_PORT', raw.get('admin_api_port', 8000))
         )
+
+        # JSON cannot represent infinity — the top tier stores a large sentinel.
+        for tier in raw.get('account_tiers', []):
+            if tier.get('max_balance', 0) >= 999_999_999:
+                tier['max_balance'] = float('inf')
 
         settings = cls()
         for key, value in raw.items():
@@ -270,25 +291,36 @@ class Settings:
         """True if the symbol is one of the three supported pairs."""
         return symbol in self.supported_symbols
 
-    def get_layer_margin(self, layer_number: int) -> float:
-        """FIXED margin (USDT) for a 1-based layer.
+    # ── Account tier helpers (balance ONLY selects the tier) ──
 
-        Layer 1 = layer1_margin_usd. Layer 2 = 2× Layer 1 (the recovery layer).
-        Sizing is identical for every account and never depends on balance.
+    def get_tier(self, balance: float) -> Optional[dict]:
+        """Return the tier config for a balance, or None if below the minimum.
+
+        Balances below ``min_tier_balance`` ($20) have no tier and must not
+        trade. Otherwise the first tier whose ``max_balance`` exceeds the
+        balance wins (Tier 1 < $40, Tier 2 ≥ $40).
         """
-        if layer_number <= 1:
-            return float(self.layer1_margin_usd)
-        return float(self.layer1_margin_usd * self.layer2_margin_multiplier)
+        if balance < self.min_tier_balance:
+            return None
+        for tier in self.account_tiers:
+            if balance < tier['max_balance']:
+                return tier
+        return self.account_tiers[-1]
 
-    def basket_tp_target_usd(self, layer_count: int) -> float:
-        """Net USDT profit target that closes the whole basket.
+    def get_tier_or_default(self, balance: float) -> dict:
+        """Tier for a balance, falling back to the most conservative (Tier 1).
 
-        Layer 1 only      → basket_tp_layer1_usd   (≈ $0.50)
-        Layer 1 + Layer 2 → basket_tp_recovery_usd (≈ $1.50–$2.00)
+        Used for managing EXISTING baskets / daily limits when the balance has
+        dipped below the minimum tier — the tightest limits stay in force.
         """
-        if layer_count >= 2:
-            return float(self.basket_tp_recovery_usd)
-        return float(self.basket_tp_layer1_usd)
+        return self.get_tier(balance) or self.account_tiers[0]
+
+    def get_tier_by_id(self, tier_id: Optional[str]) -> Optional[dict]:
+        """Look up a tier by its stored id (used to read a basket's locked tier)."""
+        for tier in self.account_tiers:
+            if tier['id'] == tier_id:
+                return tier
+        return None
 
     def validate(self) -> list[str]:
         """Validate settings and return a list of issues found (empty if OK)."""
@@ -296,6 +328,8 @@ class Settings:
 
         if not self.supported_symbols:
             issues.append('supported_symbols must not be empty')
+        if len(self.account_tiers) != 2:
+            issues.append('account_tiers must define exactly two tiers')
         if self.recovery_max_layers != 2:
             issues.append('recovery_max_layers must be exactly 2 (Layer 1 + one recovery)')
         if self.layer2_atr_multiplier <= 0:
@@ -304,18 +338,17 @@ class Settings:
             issues.append('default_leverage must be within [min_leverage, max_leverage]')
         if self.max_leverage > self.hard_max_leverage:
             issues.append('max_leverage must not exceed hard_max_leverage (10)')
-        if self.layer1_margin_usd <= 0:
-            issues.append('layer1_margin_usd must be > 0')
-        if self.layer2_margin_multiplier < 1:
-            issues.append('layer2_margin_multiplier must be >= 1')
-        if self.basket_tp_layer1_usd <= 0:
-            issues.append('basket_tp_layer1_usd must be > 0')
-        if self.basket_tp_recovery_usd <= self.basket_tp_layer1_usd:
-            issues.append('basket_tp_recovery_usd should exceed basket_tp_layer1_usd')
-        if self.daily_profit_target_usd <= 0:
-            issues.append('daily_profit_target_usd must be > 0')
-        if self.daily_loss_limit_usd <= 0:
-            issues.append('daily_loss_limit_usd must be > 0')
+        for tier in self.account_tiers:
+            tid = tier.get('id', '?')
+            if tier.get('layer1_margin', 0) <= 0 or tier.get('layer2_margin', 0) <= 0:
+                issues.append(f'{tid}: layer margins must be > 0')
+            exposure = tier.get('layer1_margin', 0) + tier.get('layer2_margin', 0)
+            if exposure > tier.get('max_basket_exposure', 0) + 1e-9:
+                issues.append(f'{tid}: L1+L2 margin exceeds max_basket_exposure')
+            if tier.get('basket_tp_l2', 0) <= tier.get('basket_tp_l1', 0):
+                issues.append(f'{tid}: basket_tp_l2 must exceed basket_tp_l1')
+            if tier.get('daily_profit_target', 0) <= 0 or tier.get('daily_loss_limit', 0) <= 0:
+                issues.append(f'{tid}: daily targets must be > 0')
         if self.max_baskets_per_account < 1:
             issues.append('max_baskets_per_account must be >= 1')
         if self.bb_period < 2:

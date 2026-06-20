@@ -78,12 +78,23 @@ class Settings:
     admin_api_key: str = ''
     admin_api_port: int = 8000
 
-    # ── Supported symbols (ONLY these — anything else is rejected) ──
+    # ── Supported symbols / watchlist (correlated assets — ONLY these traded) ──
+    # Expanded to 10 liquid, low/mid-priced USDT-M perps for more opportunities.
+    # Risk is unchanged: tier sizing, exposure caps, layer count, and per-account
+    # position limits still bound everything — more symbols only means more
+    # candidate setups, never more margin/exposure/layers.
     supported_symbols: list = field(
         default_factory=lambda: [
             'TRX/USDT:USDT',
             'XRP/USDT:USDT',
             'XLM/USDT:USDT',
+            'ADA/USDT:USDT',
+            'ALGO/USDT:USDT',
+            'HBAR/USDT:USDT',
+            'VET/USDT:USDT',
+            'LINK/USDT:USDT',
+            'DOT/USDT:USDT',
+            'ATOM/USDT:USDT',
         ]
     )
     btc_symbol: str = 'BTC/USDT:USDT'
@@ -141,6 +152,7 @@ class Settings:
                 'layer1_margin': 2.0, 'layer2_margin': 4.0,
                 'max_basket_exposure': 6.0,
                 'basket_tp_l1': 0.50, 'basket_tp_l2': 1.50,
+                'layer1_roi_target': 0.12, 'recovery_roi_target': 0.12,
                 'daily_profit_target': 3.0, 'daily_loss_limit': 3.0,
                 'max_active_symbols': 2, 'max_positions': 4,
                 'protection_floor': 15.0,
@@ -150,6 +162,7 @@ class Settings:
                 'layer1_margin': 4.0, 'layer2_margin': 8.0,
                 'max_basket_exposure': 12.0,
                 'basket_tp_l1': 0.80, 'basket_tp_l2': 2.00,
+                'layer1_roi_target': 0.10, 'recovery_roi_target': 0.10,
                 'daily_profit_target': 4.0, 'daily_loss_limit': 4.0,
                 'max_active_symbols': 3, 'max_positions': 6,
                 'protection_floor': 30.0,
@@ -161,10 +174,12 @@ class Settings:
 
     # ── Recovery model (max 2 layers — NO Layer 3/4/5, never a martingale) ──
     recovery_max_layers: int = 2
-    # Layer 2 activates only when Layer 1 drawdown exceeds an ATR-based
-    # distance:  Layer2Distance = ATR(14) × layer2_atr_multiplier.
+    # Layer 2 activates on a HYBRID trigger — whichever occurs FIRST of:
+    #   A) price moves ATR(14) × layer2_atr_multiplier against Layer 1, OR
+    #   B) Layer 1 floating loss ≥ recovery_loss_trigger_usd (USDT).
     # Volatility-adjusted spacing — NOT fixed grid spacing.
     layer2_atr_multiplier: float = 2.0
+    recovery_loss_trigger_usd: float = 0.50
 
     # ── Position limits (max active symbols / total positions are PER-TIER) ──
     max_basket_per_symbol: int = 1          # never two baskets on one symbol
@@ -357,6 +372,10 @@ class Settings:
                 issues.append(f'{tid}: L1+L2 margin exceeds max_basket_exposure')
             if tier.get('basket_tp_l2', 0) <= tier.get('basket_tp_l1', 0):
                 issues.append(f'{tid}: basket_tp_l2 must exceed basket_tp_l1')
+            for roi_key in ('recovery_roi_target', 'layer1_roi_target'):
+                roi = tier.get(roi_key, 0)
+                if roi <= 0 or roi >= 1:
+                    issues.append(f'{tid}: {roi_key} must be between 0 and 1')
             if tier.get('daily_profit_target', 0) <= 0 or tier.get('daily_loss_limit', 0) <= 0:
                 issues.append(f'{tid}: daily targets must be > 0')
             if tier.get('max_active_symbols', 0) < 1:

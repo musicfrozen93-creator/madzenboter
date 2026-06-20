@@ -1,7 +1,11 @@
 {
     "use_testnet": false,
 
-    "supported_symbols": ["TRX/USDT:USDT", "XRP/USDT:USDT", "XLM/USDT:USDT"],
+    "supported_symbols": [
+        "TRX/USDT:USDT", "XRP/USDT:USDT", "XLM/USDT:USDT", "ADA/USDT:USDT",
+        "ALGO/USDT:USDT", "HBAR/USDT:USDT", "VET/USDT:USDT", "LINK/USDT:USDT",
+        "DOT/USDT:USDT", "ATOM/USDT:USDT"
+    ],
     "btc_symbol": "BTC/USDT:USDT",
 
     "timeframe": "15m",
@@ -34,6 +38,7 @@
             "layer1_margin": 2.0, "layer2_margin": 4.0,
             "max_basket_exposure": 6.0,
             "basket_tp_l1": 0.50, "basket_tp_l2": 1.50,
+            "layer1_roi_target": 0.12, "recovery_roi_target": 0.12,
             "daily_profit_target": 3.0, "daily_loss_limit": 3.0,
             "max_active_symbols": 2, "max_positions": 4,
             "protection_floor": 15.0
@@ -43,6 +48,7 @@
             "layer1_margin": 4.0, "layer2_margin": 8.0,
             "max_basket_exposure": 12.0,
             "basket_tp_l1": 0.80, "basket_tp_l2": 2.00,
+            "layer1_roi_target": 0.10, "recovery_roi_target": 0.10,
             "daily_profit_target": 4.0, "daily_loss_limit": 4.0,
             "max_active_symbols": 3, "max_positions": 6,
             "protection_floor": 30.0
@@ -52,6 +58,7 @@
 
     "recovery_max_layers": 2,
     "layer2_atr_multiplier": 2.0,
+    "recovery_loss_trigger_usd": 0.50,
 
     "max_basket_per_symbol": 1,
     "correlation_min_score_first": 2,

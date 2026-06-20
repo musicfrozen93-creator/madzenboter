@@ -67,18 +67,18 @@ def test_short_side_profit(settings: Settings):
 
 # ── Recovery basket ROI exit ──
 
-def test_tier1_recovery_closes_on_roi_target(settings: Settings):
-    # Tier 1 recovery: total margin $6, ROI 12% → ~$0.72 net (below the $1.50 USD).
+def test_tier1_recovery_roi_normalized_to_10pct(settings: Settings):
+    # NORMALIZATION: Tier 1 recovery ROI is now 10% (was 12%) → ~$0.60 net on $6.
     tp = TakeProfitManager(settings)
-    b = _basket([2.0, 4.0], side='long', tier='tier1')  # total margin 6
-    # Not enough profit yet (ROI < 12%).
-    reason, m = tp.evaluate_exit(b, ENTRY + 0.0015)
-    assert reason is None
-    # Profit crosses ~12% ROI (~$0.72) but stays below the $1.50 USD target.
-    reason, m = tp.evaluate_exit(b, ENTRY + 0.003)
+    assert settings.get_tier(25.0)['recovery_roi_target'] == 0.10
+    b = _basket([2.0, 4.0], side='long', tier='tier1')  # total margin 6, qty 300
+    # ~7% ROI → still open.
+    assert tp.evaluate_exit(b, ENTRY + 0.0015)[0] is None
+    # ~10.6% ROI → closes NOW (would NOT have at the old 12% target).
+    reason, m = tp.evaluate_exit(b, ENTRY + 0.0022)
     assert reason == 'roi_recovery'
+    assert 0.10 <= m['roi'] < 0.12                       # in the newly-enabled band
     assert m['net_pnl'] < m['usd_target']               # ROI fired first, not USD
-    assert m['roi'] >= 0.12
 
 
 def test_tier2_recovery_closes_on_roi_target(settings: Settings):
@@ -120,3 +120,18 @@ def test_recovery_roi_exit_short_side(settings: Settings):
     b = _basket([2.0, 4.0], side='short', tier='tier1')
     assert tp.evaluate_exit(b, ENTRY)[0] is None
     assert tp.evaluate_exit(b, ENTRY - 0.003)[0] == 'roi_recovery'
+
+
+def test_evaluate_exit_metrics_are_consistent(settings: Settings):
+    # The metrics used by TP_DEBUG / ROI_DEBUG must be internally consistent:
+    # net = gross − fee, roi = net / margin, decision matches the reason.
+    tp = TakeProfitManager(settings)
+    b = _basket([2.0], side='long', tier='tier1')        # margin 2, qty 100
+    reason, m = tp.evaluate_exit(b, ENTRY + 0.003)
+    assert abs(m['net_pnl'] - (m['gross_pnl'] - m['fee'])) < 1e-9
+    assert abs(m['roi'] - m['net_pnl'] / m['total_margin']) < 1e-9
+    assert m['decision'] == reason == 'roi_l1'
+    assert m['fee'] > 0                                   # round-trip fee deducted
+    # A flat (zero-profit) basket holds with a clean 'hold' decision.
+    _, m0 = tp.evaluate_exit(b, ENTRY)
+    assert m0['decision'] == 'hold'

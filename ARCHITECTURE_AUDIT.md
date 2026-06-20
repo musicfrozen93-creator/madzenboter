@@ -16,7 +16,8 @@ admin, logging, exchange execution) is unchanged.
 |------|--------|-------|
 | Exposure calculation | ✅ Investigated + fixed | Cap now uses INTENDED tier margins so a 2-layer basket (L1+L2=cap) is never false-blocked; L1 sized at fresh price; `EXPOSURE_DEBUG` log added. See **Exposure Logic**. |
 | ROI exit system | ✅ Implemented | `TakeProfitManager.evaluate_exit` |
-| Recovery ROI exit system | ✅ Implemented | Recovery baskets (≥2 layers); Tier 1 12%, Tier 2 10% |
+| Recovery ROI exit system | ✅ Implemented | Recovery baskets (≥2 layers); Tier 1 **10%** (normalized from 12%), Tier 2 10% |
+| Trade-closure investigation | ✅ No bug found | Math proven correct; `TP_DEBUG`/`ROI_DEBUG` logging added. See **Trade-closure investigation**. |
 | Layer 1 ROI exit | ✅ Implemented | L1-only baskets; Tier 1 12% ($0.24), Tier 2 10% ($0.40); `ROI_L1_EXIT` log |
 | Hybrid recovery trigger | ✅ Implemented | ATR×2 OR Layer-1 floating loss ≥ $0.50, whichever first; `RECOVERY_TRIGGER` logs trigger type |
 | Expanded watchlist | ✅ Implemented | 10 correlated symbols; risk unchanged (tier caps still bound margin/exposure/layers) |
@@ -84,10 +85,32 @@ Two conditions; the basket closes on the **first** met. See the detailed section
 ## ROI Logic
 
 `ROI = net basket PnL / total basket margin`, where net PnL = unrealised PnL −
-estimated round-trip taker fees. Applied as a close condition for **recovery
-baskets only** (≥2 layers): Tier 1 **12%**, Tier 2 **10%**. Because the ROI
-dollar value ($0.72 / $1.20) is below the recovery USD target ($1.50 / $2.00),
-ROI is the binding (earlier) exit for recovery baskets — freeing capital faster.
+estimated round-trip taker fees. Applied as a close condition for **every**
+basket: Layer-1-only uses `layer1_roi_target` (Tier 1 **12%** → $0.24, Tier 2
+**10%** → $0.40); recovery uses `recovery_roi_target` (Tier 1 **10%** → $0.60,
+Tier 2 **10%** → $1.20, after the normalization). Because the ROI dollar value is
+below the matching USD target, ROI is the binding (earlier) exit — freeing
+capital faster. Closures log `ROI_L1_EXIT` / `ROI_RECOVERY_EXIT`, and every
+evaluation of a profitable basket logs `TP_DEBUG` + `ROI_DEBUG`.
+
+### Trade-closure investigation (no bug)
+
+A full audit of the 10 closure-path components (basket PnL, net PnL, fee
+deduction, TP/ROI evaluation, recovery aggregation, position sync, exchange
+data, unrealised PnL, close conditions) found **the math is correct**. Proof for
+the reported "$0.72 profit, basket stayed open" case:
+
+- A Tier-1 **recovery** basket (total margin $6) at net **$0.72** → ROI =
+  0.72 / 6 = **12%**. Both the ROI target (now 10% → $0.60) and the historical
+  USD path are satisfied, so it **closes** (`roi_recovery`).
+- The historical symptom came from BEFORE ROI exits existed: a recovery basket's
+  only exit was the **$1.50** USD target, so a basket at +$0.72 (< $1.50) sat
+  open. The recovery ROI exit (and now the L1 ROI exit) fixed that. With current
+  code, `evaluate_exit` closes any basket whose net ≥ min(ROI$, USD$).
+- The only non-calculation ways a profitable basket can persist are operational,
+  not logic bugs: `MANAGE_EXISTING_POSITIONS=false` (management disabled) or a
+  transient ticker-fetch failure (retried next cycle). `TP_DEBUG`/`ROI_DEBUG`
+  now make both diagnosable in the logs.
 
 ## Stop-Loss Logic
 
@@ -214,7 +237,8 @@ so ROI is the binding exit and logs `ROI_L1_EXIT`.
 ### How Recovery Basket TP works
 Once Layer 2 is added (≥2 layers), the basket closes on the **first** of:
 - **USD target:** Tier 1 **$1.50**, Tier 2 **$2.00** (net), or
-- **ROI target:** `net PnL / total margin ≥ tier ROI` — Tier 1 **12%**, Tier 2 **10%**.
+- **ROI target:** `net PnL / total margin ≥ tier ROI` — Tier 1 **10%** ($0.60),
+  Tier 2 **10%** ($1.20).
 
 Because the ROI dollar value is lower, ROI is evaluated first and is the one that
 actually fires.
@@ -226,8 +250,8 @@ Close when `net_pnl ≥ tier_usd_target` (target chosen by layer count).
 ### How ROI TP is calculated
 `roi = net_pnl / total_basket_margin` (total margin = Σ actual layer margins).
 Close when `roi ≥ tier roi target`: Layer-1-only uses `layer1_roi_target`,
-recovery uses `recovery_roi_target` (both 0.12 / 0.10). Equivalent dollar trigger
-= `total_margin × roi_target`.
+recovery uses `recovery_roi_target` (L1: 0.12 / 0.10; recovery: 0.10 / 0.10).
+Equivalent dollar trigger = `total_margin × roi_target`.
 
 ### Which condition closes first
 For **every** basket the ROI dollar value is below the matching USD target, so as
@@ -241,7 +265,7 @@ ceiling that only matters if you raise the ROI target above it.
 - *Layer-1-only basket:* L1 margin $2. USD target $0.50, ROI 12% = **$0.24** →
   closes via **`roi_l1`** at ≈$0.24 net.
 - *Recovery basket:* L1 $2 + L2 $4 = total margin **$6**. USD target $1.50,
-  ROI 12% = **$0.72** → closes via **`roi_recovery`** at ≈$0.72 net.
+  ROI 10% = **$0.60** → closes via **`roi_recovery`** at ≈$0.60 net.
 
 **Tier 2 (account $40+), 8× leverage.**
 - *Layer-1-only basket:* L1 margin $4. USD target $0.80, ROI 10% = **$0.40** →

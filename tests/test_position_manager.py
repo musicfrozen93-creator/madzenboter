@@ -237,12 +237,12 @@ def test_open_blocked_when_balance_below_protection_floor(settings: Settings):
 
 def test_recovery_roi_exit_closes_basket(settings: Settings):
     # Open a Tier-1 basket, add the recovery layer, then a small favourable move
-    # crosses the 12% ROI target (~$0.72) and closes the basket via 'roi_recovery'.
+    # crosses the 10% ROI target (~$0.60) and closes the basket via 'roi_recovery'.
     pm, ex, db = _pm(settings, balance=25.0)
     basket = pm.open_position(_signal(), balance=25.0)
     pm._add_recovery_layer(basket, current_price=PRICE)
     assert basket.layer_count == 2
-    ex.price = PRICE + 0.002                              # ROI ≈ 15% > 12%, < $1.50 USD
+    ex.price = PRICE + 0.002                              # ROI ≈ 15% > 10%, < $1.50 USD
     pm.manage_baskets([basket], balance=25.0)
     assert basket.status != 'active'
     assert db.trades and db.trades[-1].exit_reason == 'roi_recovery'

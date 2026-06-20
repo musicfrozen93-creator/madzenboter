@@ -340,6 +340,28 @@ class PositionManager:
                 # ROI target (Layer-1 or recovery) is the lower (first-crossed)
                 # threshold, letting profitable baskets close earlier.
                 exit_reason, m = self.tp_manager.evaluate_exit(basket, price)
+
+                # ── TP_DEBUG / ROI_DEBUG — full closure-decision trace ──
+                # Emitted for any basket in profit (the "stayed open" case) and on
+                # every actual close, so the exact close decision is auditable.
+                if m['net_pnl'] > 0 or exit_reason:
+                    trade_logger.info(
+                        'TP_DEBUG | account=%s tier=%s symbol=%s basket_pnl=%.6f '
+                        'net_pnl=%.6f fee=%.6f tp_target=%.4f roi_target=%.2f%% '
+                        'current_roi=%.2f%% decision=%s',
+                        self.account_id, basket.volatility, basket.symbol,
+                        m['gross_pnl'], m['net_pnl'], m['fee'], m['usd_target'],
+                        m['roi_target'] * 100, m['roi'] * 100, m['decision'],
+                        extra=self._log_extra,
+                    )
+                    trade_logger.info(
+                        'ROI_DEBUG | account=%s tier=%s symbol=%s margin_used=%.4f '
+                        'pnl=%.6f roi=%.2f%% roi_target=%.2f%% decision=%s',
+                        self.account_id, basket.volatility, basket.symbol,
+                        m['total_margin'], m['net_pnl'], m['roi'] * 100,
+                        m['roi_target'] * 100, m['decision'], extra=self._log_extra,
+                    )
+
                 if exit_reason in ('roi_l1', 'roi_recovery'):
                     label = 'ROI_L1_EXIT' if exit_reason == 'roi_l1' else 'ROI_RECOVERY_EXIT'
                     trade_logger.info(

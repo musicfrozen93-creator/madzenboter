@@ -100,16 +100,22 @@ class TakeProfitManager:
         """
         total_margin = basket.total_margin
         metrics = {
-            'net_pnl': 0.0, 'total_margin': total_margin,
-            'roi': 0.0, 'usd_target': 0.0, 'roi_target': 0.0,
+            'gross_pnl': 0.0, 'fee': 0.0, 'net_pnl': 0.0,
+            'total_margin': total_margin, 'roi': 0.0,
+            'usd_target': 0.0, 'roi_target': 0.0, 'decision': 'hold',
         }
         if total_margin <= 0 or basket.total_quantity <= 0:
             return None, metrics
 
-        net = self.net_pnl(basket, current_price)
+        gross = basket.unrealized_pnl(current_price)
+        fee = self.estimate_fees(basket, current_price)
+        net = gross - fee
         roi = net / total_margin
         usd_target = self.target_usd(basket)
-        metrics.update({'net_pnl': net, 'roi': roi, 'usd_target': usd_target})
+        metrics.update({
+            'gross_pnl': gross, 'fee': fee, 'net_pnl': net,
+            'roi': roi, 'usd_target': usd_target,
+        })
 
         tier = self._basket_tier(basket)
         # B) ROI target (every basket) — the lower, first-crossed threshold.
@@ -121,10 +127,12 @@ class TakeProfitManager:
             roi_reason = 'roi_l1'
         metrics['roi_target'] = roi_target
         if roi_target > 0 and roi >= roi_target:
+            metrics['decision'] = roi_reason
             return roi_reason, metrics
 
         # A) Fixed-USDT target (every basket).
         if net >= usd_target:
+            metrics['decision'] = 'basket_tp'
             return 'basket_tp', metrics
 
         return None, metrics

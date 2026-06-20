@@ -68,7 +68,7 @@ net of fees), for **every** basket:
 1. **Fixed-USD target** — Layer 1 only $0.50/$0.80, recovery $1.50/$2.00.
 2. **ROI target** — `net PnL / total margin ≥ tier ROI` (Tier 1 12%, Tier 2 10%):
    - Layer-1-only → $0.24 (T1) / $0.40 (T2), logs `ROI_L1_EXIT`
-   - Recovery → $0.72 (T1) / $1.20 (T2), logs `ROI_RECOVERY_EXIT`
+   - Recovery → $0.60 (T1) / $1.20 (T2), logs `ROI_RECOVERY_EXIT`
 
 The ROI dollar amount sits below the matching USD target, so a profitable basket
 closes earlier (frees capital, faster profit realisation, improves turnover)
@@ -92,7 +92,7 @@ sizing, no dynamic/adaptive/volatility sizing, no martingale.
 | Basket TP (Layer 1) | $0.50 | $0.80 |
 | Basket TP (Layer 1 + 2) | $1.50 | $2.00 |
 | Layer-1 ROI target | 12% (→ $0.24) | 10% (→ $0.40) |
-| Recovery ROI target (≥2 layers) | 12% (→ $0.72) | 10% (→ $1.20) |
+| Recovery ROI target (≥2 layers) | 10% (→ $0.60) | 10% (→ $1.20) |
 | Daily profit target | $3 | $4 |
 | Daily loss limit | $3 | $4 |
 | Max active symbols | 2 | 3 |

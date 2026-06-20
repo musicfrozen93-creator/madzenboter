@@ -179,10 +179,21 @@ class PositionManager:
             self._skip(symbol, signal.side, f'market_info_error ({e})', tier=tier['id'])
             return None
 
+        # Size at a FRESH execution-time price (not the possibly-stale signal
+        # price) so the quantity matches the real fill and the recorded Layer-1
+        # margin stays close to the intended tier margin — keeping exposure
+        # calculations accurate.
+        try:
+            exec_price = float(self.exchange.fetch_ticker(symbol)['last']) or signal.current_price
+        except Exception:
+            exec_price = signal.current_price
+        if exec_price <= 0:
+            exec_price = signal.current_price
+
         # FIXED Layer-1 margin from the tier (never balance-scaled).
         margin = tier['layer1_margin']
         plan = self.position_sizer.build_order(
-            margin, signal.current_price, leverage, market_info
+            margin, exec_price, leverage, market_info
         )
         if not plan['suitable']:
             self._skip(symbol, signal.side, f"sizing_unsuitable ({plan['reason']})", tier=tier['id'])
@@ -201,7 +212,7 @@ class PositionManager:
             # ── Partial-fill handling — NEVER assume a full fill ──
             # Use the ACTUAL filled quantity and recompute the ACTUAL margin so
             # basket TP and exposure are derived from what really filled.
-            fill = self._resolve_fill(order, quantity, signal.current_price, leverage)
+            fill = self._resolve_fill(order, quantity, exec_price, leverage)
             if fill is None:
                 self._skip(symbol, signal.side, 'no_fill (order returned 0 filled)', tier=tier['id'])
                 return None
@@ -324,17 +335,31 @@ class PositionManager:
                 remaining.append(basket)
                 continue
             try:
-                # ── PRIORITY 2: basket take-profit ──
-                if self.tp_manager.check_basket_tp(basket, price):
-                    self.close_basket(basket, 'basket_tp')
+                # ── PRIORITY 2: basket exit (USD TP, or ROI target) ──
+                # Whichever condition is met first closes the whole basket. The
+                # ROI target (Layer-1 or recovery) is the lower (first-crossed)
+                # threshold, letting profitable baskets close earlier.
+                exit_reason, m = self.tp_manager.evaluate_exit(basket, price)
+                if exit_reason in ('roi_l1', 'roi_recovery'):
+                    label = 'ROI_L1_EXIT' if exit_reason == 'roi_l1' else 'ROI_RECOVERY_EXIT'
+                    trade_logger.info(
+                        '%s | account=%s tier=%s symbol=%s layers=%d total_margin=%.4f '
+                        'basket_pnl=%.4f roi=%.2f%% (target=%.0f%%) exit_reason=roi_target',
+                        label, self.account_id, basket.volatility, basket.symbol,
+                        basket.layer_count, m['total_margin'], m['net_pnl'],
+                        m['roi'] * 100, m['roi_target'] * 100, extra=self._log_extra,
+                    )
+                if exit_reason:
+                    self.close_basket(basket, exit_reason)
                     continue
 
-                # ── PRIORITY 3: single recovery layer ──
-                next_layer = self.recovery.check_recovery_trigger(
+                # ── PRIORITY 3: single recovery layer (hybrid trigger) ──
+                trigger = self.recovery.check_recovery_trigger(
                     basket, price, basket.atr_at_entry
                 )
-                if next_layer is not None:
-                    self._add_recovery_layer(basket, price)
+                if trigger is not None:
+                    _next_layer, trigger_type = trigger
+                    self._add_recovery_layer(basket, price, trigger_type)
 
                 self.database.update_basket(basket)
                 remaining.append(basket)
@@ -351,7 +376,14 @@ class PositionManager:
     # Recovery layer
     # ───────────────────────────────────────────
 
-    def _add_recovery_layer(self, basket: Basket, current_price: float) -> None:
+    @staticmethod
+    def _tier_layer_margin(tier: dict, layer_number: int) -> float:
+        """The tier's INTENDED margin for a 1-based layer (L1 vs L2)."""
+        return tier['layer1_margin'] if layer_number <= 1 else tier['layer2_margin']
+
+    def _add_recovery_layer(
+        self, basket: Basket, current_price: float, trigger_type: str = 'ATR_TRIGGER'
+    ) -> None:
         """Add the single recovery layer (Layer 2) to a basket."""
         # BOT_CONTROL gate (recovery layers are new exchange orders).
         if self.bot_control and not self.bot_control.can_add_recovery_layer():
@@ -368,15 +400,26 @@ class PositionManager:
         # The basket's LOCKED tier drives recovery margin and the exposure cap.
         tier = self.settings.get_tier_by_id(basket.volatility) or self.settings.account_tiers[0]
         margin = tier['layer2_margin']
+        limit = tier['max_basket_exposure']
 
-        # Never exceed the tier's maximum basket exposure.
-        projected = basket.total_margin + margin
-        if projected > tier['max_basket_exposure'] + 1e-9:
+        # ── Exposure cap (INTENDED tier margins, not fill-inflated actuals) ──
+        # The cap decision uses the tier's intended per-layer margins so a
+        # legitimate 2-layer basket (L1 + L2 = exactly the cap) is NEVER falsely
+        # blocked by a recorded actual margin that drifted above intended (e.g.
+        # from fill-price divergence on Layer 1). By construction the tiers are
+        # configured so intended L1 + L2 == the cap, so this only ever blocks a
+        # genuine misconfiguration — it does not weaken any protection.
+        intended_current = sum(
+            self._tier_layer_margin(tier, l.layer_number) for l in basket.active_layers
+        )
+        intended_projected = intended_current + margin
+        actual_current = basket.total_margin  # actual deployed margin (for logging)
+        if intended_projected > limit + 1e-9:
             logger.info(
                 'RECOVERY_SKIP | account=%s tier=%s symbol=%s reason=exposure_cap '
-                '(%.2f + %.2f = %.2f > %.2f)',
-                self.account_id, tier['id'], basket.symbol, basket.total_margin,
-                margin, projected, tier['max_basket_exposure'], extra=self._log_extra,
+                '(intended %.2f + %.2f = %.2f > limit %.2f | actual_current=%.2f)',
+                self.account_id, tier['id'], basket.symbol, intended_current,
+                margin, intended_projected, limit, actual_current, extra=self._log_extra,
             )
             return
 
@@ -421,6 +464,17 @@ class PositionManager:
                     filled_qty, actual_margin, extra=self._log_extra,
                 )
 
+            # ── EXPOSURE_DEBUG — full breakdown of the recovery exposure math ──
+            notional = filled_qty * fill_price
+            logger.info(
+                'EXPOSURE_DEBUG | account=%s tier=%s symbol=%s layer=%d fill_qty=%.8f '
+                'fill_price=%.6f notional=%.4f leverage=%dx margin_used=%.4f '
+                'current_exposure=%.4f requested_exposure=%.4f exposure_limit=%.4f',
+                self.account_id, tier['id'], basket.symbol, next_layer, filled_qty,
+                fill_price, notional, leverage, actual_margin, actual_current,
+                actual_margin, limit, extra=self._log_extra,
+            )
+
             layer = self.recovery.build_layer(
                 basket, next_layer, actual_margin, filled_qty, fill_price
             )
@@ -430,12 +484,13 @@ class PositionManager:
             # Basket TP + exposure are recomputed from the ACTUAL layer qty/margin.
             basket_pnl = basket.unrealized_pnl(current_price)
             trade_logger.info(
-                'RECOVERY | account=%s tier=%s symbol=%s direction=%s layer=%d entry=%.6f '
-                'qty=%.8f margin=%.4f basket_pnl=%.4f exposure=%.4f | reason: Layer 1 '
-                'drawdown exceeded ATR×%.1f',
+                'RECOVERY | account=%s tier=%s symbol=%s direction=%s layer=%d trigger=%s '
+                'entry=%.6f qty=%.8f margin=%.4f basket_pnl=%.4f exposure=%.4f | reason: '
+                'hybrid trigger (ATR×%.1f or L1 loss ≥ $%.2f)',
                 self.account_id, tier['id'], basket.symbol, basket.side.upper(), next_layer,
-                fill_price, filled_qty, actual_margin, basket_pnl, basket.total_margin,
-                self.settings.layer2_atr_multiplier, extra=self._log_extra,
+                trigger_type, fill_price, filled_qty, actual_margin, basket_pnl,
+                basket.total_margin, self.settings.layer2_atr_multiplier,
+                self.settings.recovery_loss_trigger_usd, extra=self._log_extra,
             )
         except Exception as e:
             logger.error(

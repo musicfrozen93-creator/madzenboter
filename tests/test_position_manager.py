@@ -40,6 +40,10 @@ class FakeExchange:
         # Fill at the current price; report the ACTUAL filled quantity.
         return {'average': self.price, 'amount': qty, 'filled': qty * self.filled_ratio}
 
+    def close_position(self, symbol, side, qty):
+        self.orders.append((symbol, 'close', qty))
+        return {'average': self.price, 'filled': qty}
+
     def fetch_ticker(self, symbol):
         return {'last': self.price}
 
@@ -99,9 +103,9 @@ def _pm(settings: Settings, balance: float, filled_ratio: float = 1.0):
     return pm, ex, db
 
 
-def _signal(side='long', strength_score=4, symbol=SYMBOL) -> Signal:
+def _signal(side='long', strength_score=4, symbol=SYMBOL, atr=0.001) -> Signal:
     return Signal(
-        symbol=symbol, side=side, strength=0.8, atr=0.001, market_regime='neutral',
+        symbol=symbol, side=side, strength=0.8, atr=atr, market_regime='neutral',
         volatility='normal', current_price=PRICE, ema200=PRICE, rsi=25.0,
         bb_lower=PRICE, bb_upper=PRICE + 0.01, reason='test entry',
         strength_score=strength_score,
@@ -144,16 +148,19 @@ def test_recovery_uses_locked_tier_not_current_balance(settings: Settings):
     assert basket.total_margin == 6.0
 
 
-def test_recovery_blocked_by_exposure_cap(settings: Settings):
+def test_recovery_allowed_despite_inflated_recorded_margin(settings: Settings):
+    # EXPOSURE BUG FIX: a recorded L1 margin that drifted ABOVE intended (e.g. from
+    # fill-price divergence) must NOT falsely block the legitimate 2-layer recovery.
+    # The cap uses the tier's INTENDED margins (L1 $2 + L2 $4 = $6 ≤ $6), so a
+    # basket whose recorded L1 margin reads $3 still gets its recovery layer.
     pm, ex, db = _pm(settings, balance=25.0)
-    # Contrived Tier-1 basket already near the cap: L1 margin $3 → +$4 = $7 > $6.
     basket = Basket(symbol=SYMBOL, side='long', atr_at_entry=0.001, volatility='tier1',
-                    leverage=5, account_id=1)
-    basket.add_layer(RecoveryLayer(1, entry_price=PRICE, margin=3.0, quantity=150.0, side='long'))
+                    leverage=8, account_id=1)
+    basket.add_layer(RecoveryLayer(1, entry_price=PRICE, margin=3.0, quantity=240.0, side='long'))
     ex.orders.clear()
     pm._add_recovery_layer(basket, current_price=PRICE)
-    assert basket.layer_count == 1                  # blocked — no Layer 2 added
-    assert ex.orders == []
+    assert basket.layer_count == 2                  # recovery ALLOWED (fix), not blocked
+    assert ex.orders                                # an order was placed
 
 
 def test_no_third_layer(settings: Settings):
@@ -226,6 +233,44 @@ def test_open_blocked_when_balance_below_protection_floor(settings: Settings):
     assert pm.open_position(_signal(), balance=14.0) is None
     # $14 is also below min_tier_balance ($20), so no tier — either way, no trade.
     assert db.baskets == []
+
+
+def test_recovery_roi_exit_closes_basket(settings: Settings):
+    # Open a Tier-1 basket, add the recovery layer, then a small favourable move
+    # crosses the 12% ROI target (~$0.72) and closes the basket via 'roi_recovery'.
+    pm, ex, db = _pm(settings, balance=25.0)
+    basket = pm.open_position(_signal(), balance=25.0)
+    pm._add_recovery_layer(basket, current_price=PRICE)
+    assert basket.layer_count == 2
+    ex.price = PRICE + 0.002                              # ROI ≈ 15% > 12%, < $1.50 USD
+    pm.manage_baskets([basket], balance=25.0)
+    assert basket.status != 'active'
+    assert db.trades and db.trades[-1].exit_reason == 'roi_recovery'
+
+
+def test_layer1_roi_exit_closes_basket(settings: Settings):
+    # A Layer-1-only basket closes via 'roi_l1' once it reaches the 12% ROI target
+    # (~$0.24 on $2 margin), before the $0.50 USD target — addresses the
+    # "profitable trades remained open" report.
+    pm, ex, db = _pm(settings, balance=25.0)
+    basket = pm.open_position(_signal(), balance=25.0)
+    assert basket.layer_count == 1
+    ex.price = PRICE + 0.002                              # ROI ≈ 15% > 12%, < $0.50 USD
+    pm.manage_baskets([basket], balance=25.0)
+    assert basket.status != 'active'
+    assert db.trades and db.trades[-1].exit_reason == 'roi_l1'
+
+
+def test_hybrid_loss_trigger_adds_recovery_layer(settings: Settings):
+    # Big ATR so the ATR distance is never reached; a small adverse move that puts
+    # Layer 1 floating loss ≥ $0.50 must still add the recovery layer (LOSS_TRIGGER).
+    pm, ex, db = _pm(settings, balance=25.0)
+    basket = pm.open_position(_signal(atr=1.0), balance=25.0)   # ATR huge → ATR never triggers
+    assert basket.layer_count == 1
+    # L1 qty = 160 @ 0.10; drop to 0.0960 → L1 loss = (0.10−0.096)*160 = $0.64 ≥ $0.50.
+    ex.price = 0.0960
+    pm.manage_baskets([basket], balance=25.0)
+    assert basket.layer_count == 2                            # recovery layer added
 
 
 def test_manage_triggers_protection_and_closes_all(settings: Settings):

@@ -1,9 +1,9 @@
 # ZenGrid Futures Core — Dark-Venus Basket Recovery
 
 A lightweight, survival-first **basket recovery** trading core for Binance
-USDT-M Futures, inspired by the Dark Venus model. It trades only three liquid,
-low-priced pairs on the 15-minute timeframe using mean-reversion entries, a
-controlled 2-layer recovery basket, and fixed-dollar basket take-profit.
+USDT-M Futures, inspired by the Dark Venus model. It trades a curated list of
+10 liquid, correlated USDT-M pairs on the 15-minute timeframe using mean-reversion
+entries, a controlled 2-layer recovery basket, and dollar + ROI basket take-profit.
 
 The goal is **not** maximum profit. The priority order is:
 
@@ -16,13 +16,14 @@ Profit is never prioritised over survival.
 
 ---
 
-## Supported Symbols (ONLY these)
+## Supported Symbols (watchlist — ONLY these are traded)
 
-- `TRXUSDT`
-- `XRPUSDT`
-- `XLMUSDT`
+`TRXUSDT`, `XRPUSDT`, `XLMUSDT`, `ADAUSDT`, `ALGOUSDT`, `HBARUSDT`, `VETUSDT`,
+`LINKUSDT`, `DOTUSDT`, `ATOMUSDT` — 10 correlated pairs.
 
 No other symbols are ever traded. Timeframe is **15-minute candles only**.
+Expanding the watchlist only adds candidate setups — tier sizing, exposure caps,
+layer count, and per-account position limits still bound all risk.
 
 ---
 
@@ -56,13 +57,22 @@ Uses `BTCUSDT` 15m:
 ### Recovery model (max 2 layers — NO Layer 3/4/5)
 
 - **Layer 1:** fixed tier margin, opened on the entry signal.
-- **Layer 2:** the single recovery layer (2× Layer-1 margin), activated only when
-  Layer-1 drawdown ≥ `ATR(14) × 2`. Spacing is volatility-adjusted (ATR-based),
-  never fixed grid spacing.
+- **Layer 2:** the single recovery layer (2× Layer-1 margin), activated on a
+  **hybrid trigger** — whichever occurs first of: Layer-1 drawdown ≥ `ATR(14) × 2`
+  (`ATR_TRIGGER`), or Layer-1 floating loss ≥ `$0.50` (`LOSS_TRIGGER`). ATR
+  spacing is volatility-adjusted, never fixed grid spacing.
 
-When the recovery layer activates the basket take-profit target is recalculated.
-The **entire basket** is closed together when its net profit (after fees) reaches
-the tier target.
+The **entire basket** closes together on the **first** of two conditions (both
+net of fees), for **every** basket:
+
+1. **Fixed-USD target** — Layer 1 only $0.50/$0.80, recovery $1.50/$2.00.
+2. **ROI target** — `net PnL / total margin ≥ tier ROI` (Tier 1 12%, Tier 2 10%):
+   - Layer-1-only → $0.24 (T1) / $0.40 (T2), logs `ROI_L1_EXIT`
+   - Recovery → $0.72 (T1) / $1.20 (T2), logs `ROI_RECOVERY_EXIT`
+
+The ROI dollar amount sits below the matching USD target, so a profitable basket
+closes earlier (frees capital, faster profit realisation, improves turnover)
+instead of waiting for the larger fixed-USD target.
 
 ---
 
@@ -81,6 +91,8 @@ sizing, no dynamic/adaptive/volatility sizing, no martingale.
 | Max basket exposure | $6 | $12 |
 | Basket TP (Layer 1) | $0.50 | $0.80 |
 | Basket TP (Layer 1 + 2) | $1.50 | $2.00 |
+| Layer-1 ROI target | 12% (→ $0.24) | 10% (→ $0.40) |
+| Recovery ROI target (≥2 layers) | 12% (→ $0.72) | 10% (→ $1.20) |
 | Daily profit target | $3 | $4 |
 | Daily loss limit | $3 | $4 |
 | Max active symbols | 2 | 3 |

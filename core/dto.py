@@ -192,6 +192,6 @@ class TradeRecord:
     layers_used: int
     entry_time: float
     exit_time: float
-    exit_reason: str  # 'basket_tp', 'daily_loss_limit', 'force_close_all', 'manual'
+    exit_reason: str  # 'basket_tp', 'roi_l1', 'roi_recovery', 'daily_loss_limit', 'protection_lock', 'force_close_all', 'manual'
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     account_id: Optional[int] = None  # None = master account

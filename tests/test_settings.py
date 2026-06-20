@@ -3,11 +3,12 @@
 from config.settings import Settings
 
 
-def test_only_three_supported_symbols(settings: Settings):
-    assert settings.supported_symbols == [
-        'TRX/USDT:USDT', 'XRP/USDT:USDT', 'XLM/USDT:USDT',
-    ]
-    assert settings.is_supported_symbol('TRX/USDT:USDT')
+def test_expanded_watchlist(settings: Settings):
+    # Expanded to 10 correlated USDT-M perps.
+    assert len(settings.supported_symbols) == 10
+    for base in ('TRX', 'XRP', 'XLM', 'ADA', 'ALGO', 'HBAR', 'VET', 'LINK', 'DOT', 'ATOM'):
+        assert settings.is_supported_symbol(f'{base}/USDT:USDT')
+    # Anything outside the list is still blocked.
     assert not settings.is_supported_symbol('BTC/USDT:USDT')
     assert not settings.is_supported_symbol('DOGE/USDT:USDT')
 

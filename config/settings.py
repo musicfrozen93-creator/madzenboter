@@ -152,7 +152,9 @@ class Settings:
                 'layer1_margin': 2.0, 'layer2_margin': 4.0,
                 'max_basket_exposure': 6.0,
                 'basket_tp_l1': 0.50, 'basket_tp_l2': 1.50,
-                'layer1_roi_target': 0.12, 'recovery_roi_target': 0.12,
+                # Recovery ROI normalized to 10% (was 12%) for faster recovery
+                # exits; reward stays proportional to the larger $6 total margin.
+                'layer1_roi_target': 0.12, 'recovery_roi_target': 0.10,
                 'daily_profit_target': 3.0, 'daily_loss_limit': 3.0,
                 'max_active_symbols': 2, 'max_positions': 4,
                 'protection_floor': 15.0,

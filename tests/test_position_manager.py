@@ -261,16 +261,32 @@ def test_layer1_roi_exit_closes_basket(settings: Settings):
     assert db.trades and db.trades[-1].exit_reason == 'roi_l1'
 
 
-def test_hybrid_loss_trigger_adds_recovery_layer(settings: Settings):
-    # Big ATR so the ATR distance is never reached; a small adverse move that puts
-    # Layer 1 floating loss ≥ $0.50 must still add the recovery layer (LOSS_TRIGGER).
+def test_atr_trigger_adds_recovery_layer(settings: Settings):
+    # Recovery still works through manage_baskets via the ATR trigger, which in
+    # normal volatility fires at a loss WELL BELOW the −$0.50 basket hard-SL floor
+    # (so the basket adds Layer 2 rather than stopping out). ATR 0.001 → distance
+    # 0.002 → trigger at 0.098; L1 loss there = (0.10−0.098)*160 = $0.32 (< $0.50).
     pm, ex, db = _pm(settings, balance=25.0)
-    basket = pm.open_position(_signal(atr=1.0), balance=25.0)   # ATR huge → ATR never triggers
+    basket = pm.open_position(_signal(atr=0.001), balance=25.0)
     assert basket.layer_count == 1
-    # L1 qty = 160 @ 0.10; drop to 0.0960 → L1 loss = (0.10−0.096)*160 = $0.64 ≥ $0.50.
-    ex.price = 0.0960
+    ex.price = 0.098
     pm.manage_baskets([basket], balance=25.0)
     assert basket.layer_count == 2                            # recovery layer added
+    assert basket.status == 'active'                          # not SL-stopped
+
+
+def test_basket_sl_preempts_loss_trigger_recovery(settings: Settings):
+    # Survival-first priority: when a Layer-1 loss reaches the −$0.50 hard-SL floor
+    # WITHOUT the ATR trigger having fired (large ATR), the basket is stopped out
+    # via 'basket_sl' instead of doubling down with a recovery layer. The recovery
+    # code path is unchanged (see test_recovery.py); the hard SL simply outranks it.
+    pm, ex, db = _pm(settings, balance=25.0)
+    basket = pm.open_position(_signal(atr=1.0), balance=25.0)  # ATR huge → ATR never triggers
+    assert basket.layer_count == 1
+    ex.price = 0.0960                                          # L1 loss ≈ $0.64 net → ≤ −$0.50
+    pm.manage_baskets([basket], balance=25.0)
+    assert basket.status != 'active'
+    assert db.trades and db.trades[-1].exit_reason == 'basket_sl'
 
 
 def test_manage_triggers_protection_and_closes_all(settings: Settings):

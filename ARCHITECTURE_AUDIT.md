@@ -114,11 +114,22 @@ the reported "$0.72 profit, basket stayed open" case:
 
 ## Stop-Loss Logic
 
-There is **no per-position or per-basket stop-loss** by design. Downside is
-bounded by three layered account-level guards: the **daily loss limit**
-(realised+unrealised), the permanent **death-protection** equity floor, and the
-2-layer/exposure-capped basket structure. (Per the original Dark-Venus spec, the
-$3/$4 daily loss limit *is* the stop.)
+A **basket hard stop-loss** backstops the account-level guards. Each management
+cycle, if a basket's **net** PnL (gross − estimated round-trip fees) falls to
+**−`basket_hard_sl_usd`** (default **−$0.50**) the whole basket is closed
+immediately with reason **`basket_sl`** (`TakeProfitManager.evaluate_exit` →
+`PositionManager._close_basket_sl`, logging `BASKET_SL_HIT`). It applies to
+Layer-1 **and** recovery baskets on every supported symbol, and guarantees a
+single basket can never consume a large slice of the daily loss allowance.
+
+This sits **below** — and never weakens — the three account-level guards that
+still fire first when breached: the **daily loss limit** (realised+unrealised),
+the permanent **death-protection** equity floor, and the 2-layer/exposure-capped
+basket structure. Because the basket SL ($0.50 net) and the recovery
+`LOSS_TRIGGER` ($0.50 L1 floating) sit at the same dollar level, the hard SL
+**outranks** the loss-trigger recovery add (survival before profit); in normal
+volatility the recovery **`ATR_TRIGGER`** still fires at a much smaller loss, so
+2-layer recovery is unaffected.
 
 ## Daily Profit Logic
 
@@ -283,9 +294,11 @@ ceiling that only matters if you raise the ROI target above it.
 |----------|-----------|------|---------------|-------|
 | P0 | Equity (wallet + floating) < tier floor ($15/$30) | `check_account_death_protection` | `protection_lock` | ALL baskets, permanent lock |
 | P1 | Realised+unrealised daily PnL ≤ −tier limit ($3/$4) | `check_loss_limit` | `daily_loss_limit` | ALL baskets, lock to UTC reset |
-| P2a | L1-only ROI ≥ tier L1 ROI (12%/10%) | `evaluate_exit` | `roi_l1` | this basket |
-| P2b | Recovery ROI ≥ tier ROI (12%/10%) | `evaluate_exit` | `roi_recovery` | this basket |
-| P2c | Net PnL ≥ tier USD target | `evaluate_exit` | `basket_tp` | this basket |
+| P2a | TP-locked basket (committed profit exit) | `_execute_tp_locked_close` | (held reason) | this basket, frozen + retried |
+| P2b | L1-only ROI ≥ L1 ROI target (TRX 8%, else 12%/10%) | `evaluate_exit` | `roi_l1` | this basket, sets TP lock |
+| P2c | Recovery ROI ≥ recovery ROI target (TRX 8%, else 10%) | `evaluate_exit` | `roi_recovery` | this basket, sets TP lock |
+| P2d | Net PnL ≥ tier USD target | `evaluate_exit` | `basket_tp` | this basket, sets TP lock |
+| P2e | Net PnL ≤ −`basket_hard_sl_usd` (−$0.50) | `evaluate_exit` | `basket_sl` | this basket |
 | — | Admin force-close | `request_force_close_all` | `force_close_all` | ALL baskets |
 | — | Exchange position vanished (manual/liquidation) | `reconcile_baskets` | finalised | this basket |
 
@@ -312,13 +325,78 @@ The recovery ROI exit (prior update) does the same for 2-layer baskets.
 
 ---
 
+## TP Lock (exit-execution guarantee)
+
+When any profit target fires (`roi_l1`, `roi_recovery`, or `basket_tp`) the
+basket's exit decision is **committed and frozen**: `_activate_tp_lock` persists
+`tp_lock_<basket_id>` (account-scoped, in `bot_state`) and logs
+`TP_LOCK_ACTIVATED`. While the lock is set, `manage_baskets` **stops
+re-evaluating** targets for that basket (ignores all later price/ROI/TP changes)
+and only keeps attempting closure via `_execute_tp_locked_close` →
+`close_basket`. The lock is released — and `TP_LOCK_EXECUTED` logged — **only**
+after a confirmed flat closure (position size 0, exchange-confirmed). If the
+exchange rejects, the network fails, or the close partially fills, the lock is
+**held** and retried on the next cycle (`TP_LOCK_RETRY`). Because the lock is
+DB-persisted it survives bot/process/server restart and crash recovery, so a
+target that was reached can never be left open by a post-target reversal.
+
+`close_basket` itself now **continues closing the remaining quantity** on a
+partial close (re-submitting the remainder up to the retry budget) and only
+finalises when flat — so a partially-filled close never under-closes a basket.
+
+## Per-symbol ROI overrides (TRX)
+
+ROI targets are resolved through `Settings.roi_targets_for(symbol, tier)`, which
+starts from the basket's locked tier and applies any `symbol_roi_overrides`
+entry. **TRXUSDT** uses **8% Layer-1 ROI and 8% recovery ROI** (it historically
+stayed open for extended periods, locking capital and accruing fees); every
+other symbol keeps its tier defaults (Tier 1 L1 12%, Tier 2 L1 10%, recovery
+10%).
+
+## Exit Execution Audit
+
+Every closure path was audited end-to-end (expected trigger → actual trigger →
+expected close → actual close):
+
+| Path | Trigger (expected = actual) | Close (expected = actual) |
+|------|-----------------------------|---------------------------|
+| `basket_tp` | net PnL ≥ tier USD target | TP lock set → `close_basket` → trade `basket_tp` |
+| `roi_l1` | L1-only ROI ≥ L1 ROI target (TRX 8% / 12% / 10%) | TP lock set → `close_basket` → trade `roi_l1` |
+| `roi_recovery` | ≥2-layer ROI ≥ recovery ROI target (TRX 8% / 10%) | TP lock set → `close_basket` → trade `roi_recovery` |
+| `basket_sl` | net PnL ≤ −$0.50 | `BASKET_SL_HIT` → `close_basket` → trade `basket_sl` |
+| `daily_loss_lock` | realised+unrealised ≤ −tier limit | `close_all_baskets` → trades `daily_loss_limit`, account locked |
+| `daily_profit_lock` | realised+unrealised ≥ tier target | latches new-entry lock (no close) |
+| `protection_lock` | equity < tier floor | `close_all_baskets` → trades `protection_lock`, permanent lock |
+
+Diagnostics on every evaluation: `TP_DEBUG` (gross/net PnL, fees, ROI, ROI
+target, USD target, decision) and `ROI_DEBUG` (margin used, PnL, ROI, target
+ROI, decision); plus `TP_LOCK_ACTIVATED` / `TP_LOCK_EXECUTED` / `TP_LOCK_RETRY`
+and `BASKET_SL_HIT` for the new paths.
+
+### Worked examples
+
+| Scenario | Basket | Closes via | At ≈ |
+|----------|--------|-----------|------|
+| Tier 1 L1 exit | L1 $2 (non-TRX) | `roi_l1` (12%) | $0.24 net |
+| Tier 1 recovery exit | L1 $2 + L2 $4 = $6 | `roi_recovery` (10%) | $0.60 net |
+| Tier 2 L1 exit | L1 $4 (non-TRX) | `roi_l1` (10%) | $0.40 net |
+| Tier 2 recovery exit | L1 $4 + L2 $8 = $12 | `roi_recovery` (10%) | $1.20 net |
+| TRX L1 exit | L1 $2 | `roi_l1` (8%) | $0.16 net |
+| TRX recovery exit | L1 $2 + L2 $4 = $6 | `roi_recovery` (8%) | $0.48 net |
+| Basket SL exit | any basket | `basket_sl` | −$0.50 net |
+| TP lock activation | target reached | freeze + persist `tp_lock_<id>` | on first hit |
+| TP lock execution | position flat + confirmed | release lock, `TP_LOCK_EXECUTED` | on confirmed close |
+
+---
+
 ## Remaining weaknesses
 
-1. **No per-position stop-loss.** A single basket can sit deeply underwater
-   (Layer 2 only doubles down once) until the *account-level* daily loss /
-   death-protection guard fires. This is by design (Dark-Venus), but it means a
-   fast adverse move can take an account close to its daily loss limit in one
-   basket before any per-basket cut.
+1. ~~No per-position stop-loss.~~ **Resolved** — the **basket hard stop-loss**
+   (net −$0.50, reason `basket_sl`) now cuts a single basket before it can take
+   an account close to its daily loss limit. Residual nuance: because the SL and
+   the recovery `LOSS_TRIGGER` share the $0.50 level, the loss-trigger recovery
+   add is preempted by the SL (intentional — survival before profit); ATR-trigger
+   recovery is unaffected.
 2. **Death protection uses real equity (wallet + floating).** Deposits raise
    equity and can move an account away from its floor; this is intentional (real
    survival value) but differs from the deposit-immune daily PnL. Flagged for
@@ -345,9 +423,9 @@ The recovery ROI exit (prior update) does the same for 2-layer baskets.
 
 ## Recommended improvements
 
-1. **Optional per-basket safety stop** (configurable, off by default) as a
-   backstop independent of the daily limit — e.g. close a basket at `−X%` of its
-   margin even before the account limit. (Addresses weakness #1.)
+1. ~~Optional per-basket safety stop.~~ **Implemented** as the basket hard
+   stop-loss (`basket_hard_sl_usd`, net −$0.50). Could be extended to a per-tier
+   or `−X%`-of-margin variant if a tier-scaled cut is wanted.
 2. **Per-symbol filter thresholds** (spread/volume/ATR) for the 10-symbol
    watchlist, since tick sizes and typical spreads differ widely.
 3. **Bar-confirmed entries/score** (use the last *closed* 15m candle) to remove

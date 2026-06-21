@@ -275,7 +275,10 @@ class PositionManager:
           0. Account death protection → equity below the tier floor permanently
              PROTECTION_LOCKS the account and closes ALL baskets.
           1. Daily loss limit  → close ALL baskets, stop for the day.
-          2. Basket take-profit → close the basket at its USDT target.
+          2a. TP LOCK (frozen)  → a basket with a committed profit exit keeps
+              being closed (price/ROI changes ignored) until it is flat.
+          2b. Basket exit       → ROI/USD profit target → activate TP lock + close;
+              hard stop-loss (net ≤ −basket_hard_sl_usd) → close as 'basket_sl'.
           3. Recovery layer     → activate Layer 2 when ATR-spacing is hit.
         The daily profit target latches the new-entry lock (no closing).
         """
@@ -331,11 +334,32 @@ class PositionManager:
         remaining: List[Basket] = []
         for basket in active:
             price = prices.get(basket.symbol)
+
+            # ── PRIORITY 2a: TP LOCK (frozen exit) ──
+            # If a profit exit was already committed for this basket, the exit
+            # decision is FROZEN: ignore all later price/ROI/TP changes and keep
+            # attempting closure until the position is flat and the exchange
+            # confirms. The lock is DB-persisted per basket, so it survives a
+            # bot/process/server restart or crash recovery — a basket that hit
+            # its target can never be left open by a post-target price reversal.
+            locked_reason = self._tp_lock_reason(basket)
+            if locked_reason:
+                try:
+                    if not self._execute_tp_locked_close(basket, locked_reason, price):
+                        remaining.append(basket)  # still open — retry next cycle
+                except Exception as e:
+                    logger.error(
+                        'TP-locked close failed for %s (%s): %s',
+                        basket.id[:8], basket.symbol, e, extra=self._log_extra,
+                    )
+                    remaining.append(basket)
+                continue
+
             if not price:
                 remaining.append(basket)
                 continue
             try:
-                # ── PRIORITY 2: basket exit (USD TP, or ROI target) ──
+                # ── PRIORITY 2b: basket exit (USD TP, ROI target, or hard SL) ──
                 # Whichever condition is met first closes the whole basket. The
                 # ROI target (Layer-1 or recovery) is the lower (first-crossed)
                 # threshold, letting profitable baskets close earlier.
@@ -371,8 +395,19 @@ class PositionManager:
                         basket.layer_count, m['total_margin'], m['net_pnl'],
                         m['roi'] * 100, m['roi_target'] * 100, extra=self._log_extra,
                     )
-                if exit_reason:
-                    self.close_basket(basket, exit_reason)
+
+                # ── A profit target (ROI L1/recovery or USD TP) → TP LOCK ──
+                # Committing to the close NOW and freezing the decision prevents a
+                # post-target reversal from leaving a profitable basket open.
+                if exit_reason in ('roi_l1', 'roi_recovery', 'basket_tp'):
+                    self._activate_tp_lock(basket, exit_reason, m)
+                    if not self._execute_tp_locked_close(basket, exit_reason, price):
+                        remaining.append(basket)  # exchange busy — retry next cycle
+                    continue
+
+                # ── Hard stop-loss (net loss reached the per-basket floor) ──
+                if exit_reason == 'basket_sl':
+                    self._close_basket_sl(basket, m)
                     continue
 
                 # ── PRIORITY 3: single recovery layer (hybrid trigger) ──
@@ -521,6 +556,112 @@ class PositionManager:
             )
 
     # ───────────────────────────────────────────
+    # TP lock (persistent exit-execution guarantee)
+    # ───────────────────────────────────────────
+
+    @staticmethod
+    def _tp_lock_key(basket_id: str) -> str:
+        return f'tp_lock_{basket_id}'
+
+    def _tp_lock_reason(self, basket: Basket) -> Optional[str]:
+        """Return the committed exit reason if this basket is TP-locked, else None.
+
+        Read from the account-isolated, DB-persisted state so the lock survives a
+        bot/process/server restart and crash recovery.
+        """
+        try:
+            reason = self.database.get_state(self._tp_lock_key(basket.id))
+        except Exception as e:
+            logger.debug('tp_lock read failed for %s: %s', basket.id[:8], e)
+            return None
+        return reason or None
+
+    def _activate_tp_lock(self, basket: Basket, reason: str, m: dict) -> None:
+        """Persist the TP lock and log TP_LOCK_ACTIVATED (idempotent).
+
+        Once set, the basket's exit decision is FROZEN — manage_baskets stops
+        re-evaluating targets and only keeps attempting closure. Activation is a
+        no-op if the lock is already set (so the activation log fires once).
+        """
+        key = self._tp_lock_key(basket.id)
+        try:
+            if self.database.get_state(key):
+                return  # already locked — keep the original activation record
+        except Exception:
+            pass
+        activation_time = time.time()
+        try:
+            self.database.set_state(key, reason)
+            self.database.set_state(f'{key}_time', str(activation_time))
+        except Exception as e:
+            logger.error('Failed to persist TP lock for %s: %s', basket.id[:8], e)
+        trade_logger.info(
+            'TP_LOCK_ACTIVATED | account=%s symbol=%s roi=%.2f%% pnl=%.4f '
+            'target_hit=%s activation_time=%.0f',
+            self.account_id, basket.symbol, m.get('roi', 0.0) * 100,
+            m.get('net_pnl', 0.0), reason, activation_time, extra=self._log_extra,
+        )
+
+    def _release_tp_lock(self, basket: Basket) -> None:
+        """Clear the persisted TP lock (only after a confirmed flat closure)."""
+        key = self._tp_lock_key(basket.id)
+        try:
+            self.database.set_state(key, '')
+            self.database.set_state(f'{key}_time', '')
+        except Exception as e:
+            logger.debug('Failed to clear TP lock for %s: %s', basket.id[:8], e)
+
+    def _execute_tp_locked_close(
+        self, basket: Basket, reason: str, price: Optional[float]
+    ) -> bool:
+        """Attempt the committed close; release the lock only on confirmed closure.
+
+        Returns True if the basket is now flat (position size 0, exchange
+        confirmed) and the lock has been released + TP_LOCK_EXECUTED logged.
+        Returns False if the close did not complete (exchange reject / network /
+        partial) — the lock STAYS persisted so the next cycle retries.
+        ``close_basket`` itself already retries the close order and continues on
+        partial fills; this layer adds the persistent, across-restart guarantee.
+        """
+        trade = self.close_basket(basket, reason)
+        if basket.status != 'closed':
+            logger.warning(
+                'TP_LOCK_RETRY | account=%s symbol=%s reason=%s — close not '
+                'confirmed, lock held for next cycle.',
+                self.account_id, basket.symbol, reason, extra=self._log_extra,
+            )
+            return False
+
+        final_pnl = trade.pnl if trade else 0.0
+        final_roi = (
+            (final_pnl / trade.margin) if (trade and trade.margin > 0) else 0.0
+        )
+        self._release_tp_lock(basket)
+        trade_logger.info(
+            'TP_LOCK_EXECUTED | account=%s symbol=%s final_pnl=%.4f final_roi=%.2f%% '
+            'execution_time=%.0f close_reason=%s',
+            self.account_id, basket.symbol, final_pnl, final_roi * 100,
+            time.time(), reason, extra=self._log_extra,
+        )
+        return True
+
+    def _close_basket_sl(self, basket: Basket, m: dict) -> None:
+        """Close a basket that hit the per-basket hard stop-loss (reason basket_sl).
+
+        Logs BASKET_SL_HIT with the full breakdown. Closing the basket also
+        cancels any pending recovery action (a SL'd basket is finalized, so the
+        management loop never adds a recovery layer to it).
+        """
+        trade_logger.info(
+            'BASKET_SL_HIT | account=%s tier=%s symbol=%s layers=%d gross_pnl=%.4f '
+            'net_pnl=%.4f est_fees=%.4f roi=%.2f%% close_reason=basket_sl',
+            self.account_id, basket.volatility, basket.symbol, basket.layer_count,
+            m.get('gross_pnl', 0.0), m.get('net_pnl', 0.0), m.get('fee', 0.0),
+            m.get('roi', 0.0) * 100, extra=self._log_extra,
+        )
+        self.close_basket(basket, 'basket_sl')
+
+    # ───────────────────────────────────────────
     # Close operations
     # ───────────────────────────────────────────
 
@@ -543,16 +684,46 @@ class PositionManager:
             ticker = self.exchange.fetch_ticker(basket.symbol)
             current_price = float(ticker['last'])
 
+            # ── Close the FULL quantity, continuing on partial fills ──
+            # Each reduce-only close reports its actual filled qty; if it only
+            # partially fills we keep submitting the REMAINING quantity (never
+            # assume a full close). The close is only considered done when the
+            # remaining quantity reaches zero (or the exchange reports already
+            # flat). A close that never completes returns None so the caller —
+            # e.g. an active TP lock — retries on the next cycle without ever
+            # releasing the lock.
+            remaining_qty = total_qty
+            closed_ok = False
             for attempt in range(3):
                 try:
-                    self.exchange.close_position(basket.symbol, basket.side, total_qty)
-                    break
+                    order = self.exchange.close_position(
+                        basket.symbol, basket.side, remaining_qty
+                    )
+                    filled = self._closed_fill_qty(order, remaining_qty)
+                    remaining_qty = max(0.0, remaining_qty - filled)
+                    if remaining_qty <= total_qty * 1e-6:
+                        closed_ok = True
+                        break
+                    logger.warning(
+                        'PARTIAL_CLOSE | account=%s symbol=%s remaining=%.8f — '
+                        'continuing to close the remainder.',
+                        self.account_id, basket.symbol, remaining_qty,
+                        extra=self._log_extra,
+                    )
+                    if attempt == 2:
+                        logger.critical(
+                            'FAILED to fully close basket %s after 3 attempts '
+                            '(remaining=%.8f).', basket.id[:8], remaining_qty,
+                            extra=self._log_extra,
+                        )
+                        return None
                 except Exception as e:
                     if self._is_benign_close_error(e):
                         logger.warning(
                             'Close for %s reports already flat (%s) — finalizing %s.',
                             basket.symbol, e, basket.id[:8], extra=self._log_extra,
                         )
+                        closed_ok = True
                         break
                     if attempt == 2:
                         logger.critical(
@@ -561,6 +732,9 @@ class PositionManager:
                         )
                         return None
                     time.sleep(0.25)
+
+            if not closed_ok:
+                return None
 
             gross = basket.unrealized_pnl(current_price)
             fee = total_qty * current_price * self.settings.taker_fee_pct * 2
@@ -707,6 +881,24 @@ class PositionManager:
             'quantity less than', 'unknown order sent',
         )
         return any(token in msg for token in benign)
+
+    @staticmethod
+    def _closed_fill_qty(order, requested_qty: float) -> float:
+        """Actual quantity a close order reduced — used for partial-close retries.
+
+        Reads ccxt ``filled``; when the close response does not report a filled
+        quantity (some venues/fakes omit it on a reduce-only close), assume the
+        full requested quantity closed so a fully-filled close never loops.
+        """
+        if not isinstance(order, dict):
+            return requested_qty
+        raw = order.get('filled')
+        if raw is None:
+            return requested_qty
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return requested_qty
 
     @staticmethod
     def _resolve_fill(order: dict, requested_qty: float, fallback_price: float, leverage: int):

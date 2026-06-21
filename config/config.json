@@ -56,6 +56,11 @@
     ],
     "min_notional_floor": 5.0,
 
+    "basket_hard_sl_usd": 0.50,
+    "symbol_roi_overrides": {
+        "TRX/USDT:USDT": {"layer1_roi_target": 0.08, "recovery_roi_target": 0.08}
+    },
+
     "recovery_max_layers": 2,
     "layer2_atr_multiplier": 2.0,
     "recovery_loss_trigger_usd": 0.50,

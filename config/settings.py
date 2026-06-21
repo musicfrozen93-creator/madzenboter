@@ -174,6 +174,28 @@ class Settings:
     # Absolute notional floor — Binance rejects dust orders below ~$5 notional.
     min_notional_floor: float = 5.0
 
+    # ── Basket hard stop-loss (per-basket backstop, independent of daily limit) ──
+    # A SINGLE basket must never consume a large slice of the daily loss
+    # allowance. If a basket's NET PnL (gross − estimated round-trip fees) falls
+    # to −basket_hard_sl_usd, the whole basket is closed immediately with reason
+    # 'basket_sl'. This sits BELOW the account-level daily-loss/death-protection
+    # guards (which still fire first when breached) and never weakens them — it
+    # only adds an earlier, per-basket cut. Applies to Layer-1 AND recovery
+    # baskets, every supported symbol.
+    basket_hard_sl_usd: float = 0.50
+
+    # ── Per-symbol ROI overrides (exit ROI target lookup) ──
+    # The default ROI targets live on the tier (layer1_roi_target /
+    # recovery_roi_target). A symbol listed here overrides those targets so a
+    # capital-sticky symbol can be closed sooner. TRX historically stays open for
+    # extended periods (capital locked, fees accruing), so it uses a tighter 8%
+    # Layer-1 AND recovery ROI. Every other symbol keeps its tier values.
+    symbol_roi_overrides: dict = field(
+        default_factory=lambda: {
+            'TRX/USDT:USDT': {'layer1_roi_target': 0.08, 'recovery_roi_target': 0.08},
+        }
+    )
+
     # ── Recovery model (max 2 layers — NO Layer 3/4/5, never a martingale) ──
     recovery_max_layers: int = 2
     # Layer 2 activates on a HYBRID trigger — whichever occurs FIRST of:
@@ -349,6 +371,22 @@ class Settings:
                 return tier
         return None
 
+    def roi_targets_for(self, symbol: str, tier: dict) -> tuple:
+        """Resolve (layer1_roi_target, recovery_roi_target) for a symbol.
+
+        Starts from the basket's LOCKED tier values, then applies any
+        per-symbol override from ``symbol_roi_overrides`` (e.g. TRX → 8%/8%).
+        A symbol with no override keeps the tier defaults unchanged. Returns the
+        targets as fractions (0–1).
+        """
+        l1 = float(tier.get('layer1_roi_target', 0.0))
+        rec = float(tier.get('recovery_roi_target', 0.0))
+        override = (self.symbol_roi_overrides or {}).get(symbol)
+        if override:
+            l1 = float(override.get('layer1_roi_target', l1))
+            rec = float(override.get('recovery_roi_target', rec))
+        return l1, rec
+
     def validate(self) -> list[str]:
         """Validate settings and return a list of issues found (empty if OK)."""
         issues: list[str] = []
@@ -393,5 +431,13 @@ class Settings:
             issues.append('correlation_min_score_additional must be >= correlation_min_score_first')
         if self.bb_period < 2:
             issues.append('bb_period must be >= 2')
+        if self.basket_hard_sl_usd <= 0:
+            issues.append('basket_hard_sl_usd must be > 0')
+        for sym, override in (self.symbol_roi_overrides or {}).items():
+            for roi_key in ('layer1_roi_target', 'recovery_roi_target'):
+                if roi_key in override:
+                    roi = override[roi_key]
+                    if roi <= 0 or roi >= 1:
+                        issues.append(f'symbol_roi_overrides[{sym}].{roi_key} must be between 0 and 1')
 
         return issues

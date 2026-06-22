@@ -356,8 +356,20 @@ class PositionManager:
                 continue
 
             if not price:
-                remaining.append(basket)
-                continue
+                # Ticker missing from the snapshot — RETRY before skipping so a
+                # basket that may be due to close is not deferred a whole cycle
+                # (Fix: price-fetch-failure hardening). Only skip if still no
+                # price after retries.
+                price = self._fetch_price_with_retry(basket.symbol)
+                if not price:
+                    logger.warning(
+                        'PRICE_UNAVAILABLE | account=%s symbol=%s — deferring basket '
+                        'after ticker retries.', self.account_id, basket.symbol,
+                        extra=self._log_extra,
+                    )
+                    remaining.append(basket)
+                    continue
+                prices[basket.symbol] = price
             try:
                 # ── PRIORITY 2b: basket exit (USD TP, ROI target, or hard SL) ──
                 # Whichever condition is met first closes the whole basket. The
@@ -826,18 +838,96 @@ class PositionManager:
                 still_active.append(basket)
                 continue
             logger.warning(
-                'RECONCILE | basket %s (%s %s) has no live position — finalizing.',
-                basket.id[:8], basket.side.upper(), basket.symbol, extra=self._log_extra,
+                'RECONCILE | basket %s (%s %s) has no live position — running full '
+                'closure workflow.', basket.id[:8], basket.side.upper(), basket.symbol,
+                extra=self._log_extra,
             )
-            basket.status = 'closed'
-            self.database.close_basket(basket.id)
-            self._finalize_closed_state(basket.symbol, basket.id)
+            self._finalize_reconciled_basket(basket)
 
         return still_active
+
+    def _finalize_reconciled_basket(self, basket: Basket) -> Optional[TradeRecord]:
+        """Full closure for a basket whose exchange position has vanished.
+
+        The position no longer exists on the exchange (closed externally, by a
+        prior fill whose trade write was lost, or by liquidation), so there is no
+        order to place. This still runs the COMPLETE closure workflow so state is
+        never left half-finished:
+          1. resolve the exit reason — the committed TP-lock reason if one is
+             held, else 'reconciled';
+          2. persist a trade record (exit reason, close timestamp, final PnL,
+             final ROI) priced at the best available mark; and
+          3. release the (possibly orphaned) TP lock + start the cooldown.
+        """
+        reason = self._tp_lock_reason(basket) or 'reconciled'
+        total_qty = basket.total_quantity
+        total_margin = basket.total_margin
+        layers_used = basket.layer_count
+        entry_price = basket.avg_entry_price
+
+        price = self._fetch_price_with_retry(basket.symbol)
+        if not price or price <= 0:
+            price = entry_price  # no mark available → record a flat (0 PnL) close
+        gross = basket.unrealized_pnl(price) if price > 0 else 0.0
+        fee = (
+            total_qty * price * self.settings.taker_fee_pct * 2
+            if (total_qty > 0 and price > 0) else 0.0
+        )
+        realized_pnl = gross - fee
+        roi = (realized_pnl / total_margin) if total_margin > 0 else 0.0
+
+        trade = TradeRecord(
+            basket_id=basket.id, symbol=basket.symbol, side=basket.side,
+            entry_price=entry_price, exit_price=price, quantity=total_qty,
+            margin=total_margin, leverage=basket.leverage, pnl=realized_pnl,
+            fee=fee, layers_used=layers_used, entry_time=basket.created_at,
+            exit_time=time.time(), exit_reason=reason, account_id=self.account_id,
+        )
+
+        basket.close_all()
+        self.database.close_basket(basket.id)
+        try:
+            self.database.save_trade(trade)
+        except Exception as e:
+            logger.error(
+                'RECONCILE trade persist failed for %s: %s',
+                basket.id[:8], e, extra=self._log_extra,
+            )
+        self._finalize_closed_state(basket.symbol, basket.id)
+        self._release_tp_lock(basket)   # never leave an orphaned lock behind
+
+        trade_logger.info(
+            'RECONCILE_CLOSE | account=%s tier=%s symbol=%s direction=%s layers=%d '
+            'exit=%.6f pnl=%.4f roi=%.2f%% exit_reason=%s',
+            self.account_id, basket.volatility, basket.symbol, basket.side.upper(),
+            layers_used, price, realized_pnl, roi * 100, reason, extra=self._log_extra,
+        )
+        return trade
 
     # ───────────────────────────────────────────
     # Cooldown + helpers
     # ───────────────────────────────────────────
+
+    def _fetch_price_with_retry(self, symbol: str, attempts: int = 3) -> Optional[float]:
+        """Fetch the last price, RETRYING transient ticker failures.
+
+        A single ticker hiccup must never silently defer a basket that may be due
+        to close (which previously let a hit target reverse before the next
+        cycle). Returns the price, or None only after all attempts fail.
+        """
+        for i in range(attempts):
+            try:
+                price = float(self.exchange.fetch_ticker(symbol)['last'])
+                if price > 0:
+                    return price
+            except Exception as e:
+                logger.debug(
+                    'Ticker fetch attempt %d/%d failed for %s: %s',
+                    i + 1, attempts, symbol, e,
+                )
+            if i < attempts - 1:
+                time.sleep(0.2)
+        return None
 
     @staticmethod
     def _cooldown_key(symbol: str) -> str:

@@ -10,6 +10,7 @@ New methods are added for multi-account operations.
 
 import logging
 import os
+import re
 import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -37,6 +38,30 @@ from core.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Matches an account-scoped TP-lock state key: account_<id>_tp_lock_<basket_uuid>
+# (the companion ``..._time`` key is intentionally excluded by the caller).
+_TP_LOCK_KEY_RE = re.compile(r'^account_(\d+)_tp_lock_(.+)$')
+
+
+def find_orphan_tp_locks(state: dict, active_basket_ids: set) -> List[tuple]:
+    """Pure helper: TP-lock keys that are SET but whose basket is not active.
+
+    A TP lock is orphaned when its persisted value is truthy (a committed exit
+    reason) but the basket it guards is no longer in the active set — i.e. it was
+    finalized/reconciled/closed without the lock being released. The ``_time``
+    companion keys are skipped. Returns a list of (lock_key, basket_id).
+    """
+    orphans: List[tuple] = []
+    for key, value in state.items():
+        if '_tp_lock_' not in key or key.endswith('_time'):
+            continue
+        if not value or value == 'false':
+            continue
+        basket_id = key.split('_tp_lock_', 1)[1]
+        if basket_id not in active_basket_ids:
+            orphans.append((key, basket_id))
+    return orphans
 
 
 class Database:
@@ -391,6 +416,76 @@ class Database:
         with self.session() as session:
             state = session.get(BotStateModel, key)
             return state.value if state else None
+
+    # ───────────────────────────────────────────
+    # TP-lock maintenance (orphan cleanup + consistency report)
+    # ───────────────────────────────────────────
+
+    def tp_lock_consistency_report(self) -> List[dict]:
+        """Cross-account TP-lock vs basket-state vs trade-record report.
+
+        Returns one row per persisted TP lock with: account_id, basket_id,
+        tp_lock_state, basket_state ('active'/'closed'/'MISSING'), and whether a
+        trade record exists for that basket. Read-only.
+        """
+        rows: List[dict] = []
+        with self.session() as session:
+            states = (
+                session.query(BotStateModel)
+                .filter(BotStateModel.key.like('%_tp_lock_%'))
+                .all()
+            )
+            for st in states:
+                if st.key.endswith('_time') or not st.value or st.value == 'false':
+                    continue
+                m = _TP_LOCK_KEY_RE.match(st.key)
+                account_id = int(m.group(1)) if m else None
+                basket_id = m.group(2) if m else st.key.split('_tp_lock_', 1)[1]
+                basket = session.get(BasketModel, basket_id)
+                has_trade = (
+                    session.query(TradeModel.id)
+                    .filter(TradeModel.basket_id == basket_id)
+                    .first()
+                    is not None
+                )
+                rows.append({
+                    'account_id': account_id,
+                    'basket_id': basket_id,
+                    'tp_lock_state': st.value,
+                    'basket_state': basket.status if basket else 'MISSING',
+                    'trade_record_exists': has_trade,
+                })
+        return rows
+
+    def cleanup_orphan_tp_locks(self) -> List[dict]:
+        """Startup audit: clear TP locks whose basket is no longer active.
+
+        Scans every persisted ``*_tp_lock_*`` state and releases (sets to '') any
+        lock — and its ``_time`` companion — that guards a basket which is closed
+        or missing. Returns the list of cleaned {key, basket_id} entries. This
+        only touches orphaned locks; a lock on a still-active basket (a basket
+        genuinely mid-close) is left untouched.
+        """
+        with self.session() as session:
+            active_ids = {
+                row[0]
+                for row in session.query(BasketModel.id)
+                .filter(BasketModel.status == 'active')
+                .all()
+            }
+            states = {
+                st.key: st.value
+                for st in session.query(BotStateModel)
+                .filter(BotStateModel.key.like('%_tp_lock_%'))
+                .all()
+            }
+        orphans = find_orphan_tp_locks(states, active_ids)
+        cleaned: List[dict] = []
+        for key, basket_id in orphans:
+            self.set_state(key, '')
+            self.set_state(f'{key}_time', '')
+            cleaned.append({'key': key, 'basket_id': basket_id})
+        return cleaned
 
     # ───────────────────────────────────────────
     # Daily Statistics (backward-compatible, now per-account)

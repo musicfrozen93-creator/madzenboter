@@ -330,6 +330,30 @@ class TradingEngine:
             for issue in issues:
                 logger.warning('Config issue: %s', issue)
 
+        # ── Startup TP-lock audit: report state, then clean orphaned locks ──
+        # A TP lock that survived a crash/restart but whose basket already closed
+        # (e.g. finalized via reconcile) must be released so it can never wedge.
+        try:
+            report = self.database.tp_lock_consistency_report()
+            if report:
+                logger.info('TP_LOCK_REPORT | %d tracked TP lock(s) at startup:', len(report))
+                for r in report:
+                    logger.info(
+                        '  account=%s basket=%s lock=%s basket_state=%s trade_exists=%s',
+                        r['account_id'], (r['basket_id'] or '')[:8], r['tp_lock_state'],
+                        r['basket_state'], r['trade_record_exists'],
+                    )
+            cleaned = self.database.cleanup_orphan_tp_locks()
+            if cleaned:
+                logger.warning(
+                    'TP_LOCK_CLEANUP | released %d orphaned TP lock(s) on '
+                    'closed/missing baskets at startup.', len(cleaned),
+                )
+                for c in cleaned:
+                    logger.warning('  cleared %s (basket %s)', c['key'], c['basket_id'][:8])
+        except Exception as e:
+            logger.error('Startup TP-lock audit failed: %s', e)
+
         # Start background services (multi-account mode)
         if self._sync_service:
             self._sync_service.start()

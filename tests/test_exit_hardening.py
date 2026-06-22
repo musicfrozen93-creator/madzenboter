@@ -47,19 +47,19 @@ def _tp_basket(margins, symbol=SYMBOL, side='long', tier='tier1') -> Basket:
 # Basket hard stop-loss
 # ─────────────────────────────────────────────
 
-def test_basket_sl_threshold_is_half_dollar(settings: Settings):
-    assert settings.basket_hard_sl_usd == 0.50
+def test_basket_sl_threshold_is_thirty_cents(settings: Settings):
+    assert settings.basket_hard_sl_usd == 0.30
 
 
 def test_basket_sl_fires_on_net_loss(settings: Settings):
     tp = TakeProfitManager(settings)
     b = _tp_basket([2.0], side='long', tier='tier1')   # qty 100 @ 0.10
-    # Small adverse move (−$0.40 gross) holds — above the −$0.50 floor.
-    assert not tp.check_basket_sl(b, TP_ENTRY - 0.004)
-    assert tp.evaluate_exit(b, TP_ENTRY - 0.004)[0] is None
-    # −$0.55 gross → net below −$0.50 → basket_sl.
-    assert tp.check_basket_sl(b, TP_ENTRY - 0.0055)
-    reason, m = tp.evaluate_exit(b, TP_ENTRY - 0.0055)
+    # Small adverse move (−$0.20 gross) holds — above the −$0.30 floor.
+    assert not tp.check_basket_sl(b, TP_ENTRY - 0.002)
+    assert tp.evaluate_exit(b, TP_ENTRY - 0.002)[0] is None
+    # −$0.35 gross → net below −$0.30 → basket_sl.
+    assert tp.check_basket_sl(b, TP_ENTRY - 0.0035)
+    reason, m = tp.evaluate_exit(b, TP_ENTRY - 0.0035)
     assert reason == 'basket_sl'
     assert m['net_pnl'] <= -settings.basket_hard_sl_usd
     assert m['decision'] == 'basket_sl'

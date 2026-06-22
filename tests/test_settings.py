@@ -4,9 +4,10 @@ from config.settings import Settings
 
 
 def test_expanded_watchlist(settings: Settings):
-    # Expanded to 10 correlated USDT-M perps.
-    assert len(settings.supported_symbols) == 10
-    for base in ('TRX', 'XRP', 'XLM', 'ADA', 'ALGO', 'HBAR', 'VET', 'LINK', 'DOT', 'ATOM'):
+    # Expanded to 20 correlated USDT-M perps.
+    assert len(settings.supported_symbols) == 20
+    for base in ('TRX', 'XRP', 'XLM', 'ADA', 'ALGO', 'HBAR', 'VET', 'LINK', 'DOT', 'ATOM',
+                 'LTC', 'POL', 'ETC', 'BCH', 'NEAR', 'EOS', 'FIL', 'IOTA', 'GRT', 'AVAX'):
         assert settings.is_supported_symbol(f'{base}/USDT:USDT')
     # Anything outside the list is still blocked.
     assert not settings.is_supported_symbol('BTC/USDT:USDT')
@@ -51,23 +52,23 @@ def test_tier_boundaries(settings: Settings):
 
 def test_tier1_config(settings: Settings):
     t = settings.get_tier(25.0)
-    assert t['layer1_margin'] == 2.0
-    assert t['layer2_margin'] == 4.0
-    assert t['max_basket_exposure'] == 6.0
-    assert t['basket_tp_l1'] == 0.50
-    assert t['basket_tp_l2'] == 1.50
-    assert t['daily_profit_target'] == 3.0
+    assert t['layer1_margin'] == 1.0
+    assert t['layer2_margin'] == 2.0
+    assert t['max_basket_exposure'] == 3.0
+    assert t['basket_tp_l1'] == 0.30
+    assert t['basket_tp_l2'] == 0.80
+    assert t['daily_profit_target'] == 2.0
     assert t['daily_loss_limit'] == 3.0
 
 
 def test_tier2_config(settings: Settings):
     t = settings.get_tier(50.0)
-    assert t['layer1_margin'] == 4.0
-    assert t['layer2_margin'] == 8.0
-    assert t['max_basket_exposure'] == 12.0
-    assert t['basket_tp_l1'] == 0.80
-    assert t['basket_tp_l2'] == 2.00
-    assert t['daily_profit_target'] == 4.0
+    assert t['layer1_margin'] == 2.0
+    assert t['layer2_margin'] == 4.0
+    assert t['max_basket_exposure'] == 6.0
+    assert t['basket_tp_l1'] == 0.50
+    assert t['basket_tp_l2'] == 1.20
+    assert t['daily_profit_target'] == 3.5
     assert t['daily_loss_limit'] == 4.0
 
 
@@ -89,8 +90,8 @@ def test_max_two_layers(settings: Settings):
 def test_position_limits_are_per_tier(settings: Settings):
     assert settings.max_basket_per_symbol == 1
     t1, t2 = settings.get_tier(25.0), settings.get_tier(50.0)
-    assert t1['max_active_symbols'] == 2 and t1['max_positions'] == 4
-    assert t2['max_active_symbols'] == 3 and t2['max_positions'] == 6
+    assert t1['max_active_symbols'] == 4 and t1['max_positions'] == 8
+    assert t2['max_active_symbols'] == 6 and t2['max_positions'] == 12
 
 
 def test_protection_floors(settings: Settings):

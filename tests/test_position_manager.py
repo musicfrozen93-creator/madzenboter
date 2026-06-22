@@ -124,7 +124,7 @@ def test_tier1_open_uses_two_dollar_margin(settings: Settings):
     basket = pm.open_position(_signal(), balance=25.0)
     assert basket is not None
     assert basket.volatility == 'tier1'             # tier locked onto the basket
-    assert basket.layers[0].margin == 2.0           # Tier 1 L1 = $2
+    assert basket.layers[0].margin == 1.0           # Tier 1 L1 = $1
 
 
 def test_tier2_open_uses_four_dollar_margin(settings: Settings):
@@ -132,31 +132,31 @@ def test_tier2_open_uses_four_dollar_margin(settings: Settings):
     basket = pm.open_position(_signal(), balance=50.0)
     assert basket is not None
     assert basket.volatility == 'tier2'
-    assert basket.layers[0].margin == 4.0           # Tier 2 L1 = $4
+    assert basket.layers[0].margin == 2.0           # Tier 2 L1 = $2
 
 
 def test_recovery_uses_locked_tier_not_current_balance(settings: Settings):
     # Basket opened at Tier 1. Even after a "deposit" to Tier-2 territory, the
-    # recovery layer must use the LOCKED Tier-1 margin ($4), never Tier 2 ($8).
+    # recovery layer must use the LOCKED Tier-1 margin ($2), never Tier 2 ($4).
     pm, ex, db = _pm(settings, balance=25.0)
     basket = pm.open_position(_signal(), balance=25.0)
     ex.orders.clear()
     pm._add_recovery_layer(basket, current_price=PRICE)
     assert basket.layer_count == 2
-    assert basket.layers[1].margin == 4.0           # Tier 1 L2, NOT Tier 2's $8
-    # Total basket exposure stays at the Tier-1 cap ($6).
-    assert basket.total_margin == 6.0
+    assert basket.layers[1].margin == 2.0           # Tier 1 L2, NOT Tier 2's $4
+    # Total basket exposure stays at the Tier-1 cap ($3).
+    assert basket.total_margin == 3.0
 
 
 def test_recovery_allowed_despite_inflated_recorded_margin(settings: Settings):
     # EXPOSURE BUG FIX: a recorded L1 margin that drifted ABOVE intended (e.g. from
     # fill-price divergence) must NOT falsely block the legitimate 2-layer recovery.
-    # The cap uses the tier's INTENDED margins (L1 $2 + L2 $4 = $6 ≤ $6), so a
-    # basket whose recorded L1 margin reads $3 still gets its recovery layer.
+    # The cap uses the tier's INTENDED margins (L1 $1 + L2 $2 = $3 ≤ $3), so a
+    # basket whose recorded L1 margin reads $1.5 still gets its recovery layer.
     pm, ex, db = _pm(settings, balance=25.0)
     basket = Basket(symbol=SYMBOL, side='long', atr_at_entry=0.001, volatility='tier1',
                     leverage=8, account_id=1)
-    basket.add_layer(RecoveryLayer(1, entry_price=PRICE, margin=3.0, quantity=240.0, side='long'))
+    basket.add_layer(RecoveryLayer(1, entry_price=PRICE, margin=1.5, quantity=120.0, side='long'))
     ex.orders.clear()
     pm._add_recovery_layer(basket, current_price=PRICE)
     assert basket.layer_count == 2                  # recovery ALLOWED (fix), not blocked
@@ -178,9 +178,9 @@ def test_partial_fill_sizes_basket_to_actual(settings: Settings):
     pm, ex, db = _pm(settings, balance=25.0, filled_ratio=0.5)
     basket = pm.open_position(_signal(), balance=25.0)
     assert basket is not None
-    # Tier 1 L1 ($2) at 8x / $0.10 intends qty 160; half fills → qty 80, $1 margin.
-    assert basket.layers[0].quantity == 80.0
-    assert basket.layers[0].margin == 1.0           # 80 × 0.10 / 8 = $1 actual
+    # Tier 1 L1 ($1) at 8x / $0.10 intends qty 80; half fills → qty 40, $0.50 margin.
+    assert basket.layers[0].quantity == 40.0
+    assert basket.layers[0].margin == 0.5           # 40 × 0.10 / 8 = $0.50 actual
 
 
 def test_zero_fill_rejects_basket(settings: Settings):
@@ -199,7 +199,7 @@ def test_first_basket_needs_score_two(settings: Settings):
 
 
 def test_second_correlated_basket_needs_score_three(settings: Settings):
-    pm, ex, db = _pm(settings, balance=50.0)        # Tier 2: up to 3 symbols
+    pm, ex, db = _pm(settings, balance=50.0)        # Tier 2: up to 6 symbols
     assert pm.open_position(_signal(strength_score=2, symbol='TRX/USDT:USDT'), balance=50.0)
     # A second correlated basket with only score 2 is rejected (needs 3).
     assert pm.open_position(_signal(strength_score=2, symbol='XRP/USDT:USDT'), balance=50.0) is None
@@ -209,20 +209,22 @@ def test_second_correlated_basket_needs_score_three(settings: Settings):
 
 # ── Tier-based position limits ──
 
-def test_tier1_caps_at_two_symbols(settings: Settings):
-    pm, ex, db = _pm(settings, balance=25.0)        # Tier 1: max 2 symbols
-    assert pm.open_position(_signal(symbol='TRX/USDT:USDT'), balance=25.0)
-    assert pm.open_position(_signal(symbol='XRP/USDT:USDT'), balance=25.0)
-    # Third symbol is rejected by the tier's max_active_symbols (2).
-    assert pm.open_position(_signal(symbol='XLM/USDT:USDT'), balance=25.0) is None
+def test_tier1_caps_at_four_symbols(settings: Settings):
+    pm, ex, db = _pm(settings, balance=25.0)        # Tier 1: max 4 symbols
+    for sym in ('TRX/USDT:USDT', 'XRP/USDT:USDT', 'XLM/USDT:USDT', 'ADA/USDT:USDT'):
+        assert pm.open_position(_signal(symbol=sym), balance=25.0)
+    # Fifth symbol is rejected by the tier's max_active_symbols (4).
+    assert pm.open_position(_signal(symbol='ALGO/USDT:USDT'), balance=25.0) is None
 
 
-def test_tier2_allows_three_symbols(settings: Settings):
-    pm, ex, db = _pm(settings, balance=50.0)        # Tier 2: max 3 symbols
-    assert pm.open_position(_signal(symbol='TRX/USDT:USDT'), balance=50.0)
-    assert pm.open_position(_signal(symbol='XRP/USDT:USDT'), balance=50.0)
-    assert pm.open_position(_signal(symbol='XLM/USDT:USDT'), balance=50.0)
-    assert len([b for b in db.baskets if b.status == 'active']) == 3
+def test_tier2_caps_at_six_symbols(settings: Settings):
+    pm, ex, db = _pm(settings, balance=50.0)        # Tier 2: max 6 symbols
+    for sym in ('TRX/USDT:USDT', 'XRP/USDT:USDT', 'XLM/USDT:USDT',
+                'ADA/USDT:USDT', 'ALGO/USDT:USDT', 'HBAR/USDT:USDT'):
+        assert pm.open_position(_signal(symbol=sym), balance=50.0)
+    assert len([b for b in db.baskets if b.status == 'active']) == 6
+    # Seventh symbol is rejected by the tier's max_active_symbols (6).
+    assert pm.open_position(_signal(symbol='VET/USDT:USDT'), balance=50.0) is None
 
 
 # ── Account death protection ──
@@ -237,12 +239,12 @@ def test_open_blocked_when_balance_below_protection_floor(settings: Settings):
 
 def test_recovery_roi_exit_closes_basket(settings: Settings):
     # Open a Tier-1 basket, add the recovery layer, then a small favourable move
-    # crosses the 10% ROI target (~$0.60) and closes the basket via 'roi_recovery'.
+    # crosses the 10% ROI target (~$0.30 on $3) and closes via 'roi_recovery'.
     pm, ex, db = _pm(settings, balance=25.0)
     basket = pm.open_position(_signal(), balance=25.0)
     pm._add_recovery_layer(basket, current_price=PRICE)
     assert basket.layer_count == 2
-    ex.price = PRICE + 0.002                              # ROI ≈ 15% > 10%, < $1.50 USD
+    ex.price = PRICE + 0.002                              # ROI ≈ 15% > 10%, < $0.80 USD
     pm.manage_baskets([basket], balance=25.0)
     assert basket.status != 'active'
     assert db.trades and db.trades[-1].exit_reason == 'roi_recovery'
@@ -250,12 +252,12 @@ def test_recovery_roi_exit_closes_basket(settings: Settings):
 
 def test_layer1_roi_exit_closes_basket(settings: Settings):
     # A Layer-1-only basket closes via 'roi_l1' once it reaches the 12% ROI target
-    # (~$0.24 on $2 margin), before the $0.50 USD target — addresses the
+    # (~$0.12 on $1 margin), before the $0.30 USD target — addresses the
     # "profitable trades remained open" report.
     pm, ex, db = _pm(settings, balance=25.0)
     basket = pm.open_position(_signal(), balance=25.0)
     assert basket.layer_count == 1
-    ex.price = PRICE + 0.002                              # ROI ≈ 15% > 12%, < $0.50 USD
+    ex.price = PRICE + 0.002                              # ROI ≈ 15% > 12%, < $0.30 USD
     pm.manage_baskets([basket], balance=25.0)
     assert basket.status != 'active'
     assert db.trades and db.trades[-1].exit_reason == 'roi_l1'
@@ -263,9 +265,9 @@ def test_layer1_roi_exit_closes_basket(settings: Settings):
 
 def test_atr_trigger_adds_recovery_layer(settings: Settings):
     # Recovery still works through manage_baskets via the ATR trigger, which in
-    # normal volatility fires at a loss WELL BELOW the −$0.50 basket hard-SL floor
+    # normal volatility fires at a loss WELL BELOW the −$0.30 basket hard-SL floor
     # (so the basket adds Layer 2 rather than stopping out). ATR 0.001 → distance
-    # 0.002 → trigger at 0.098; L1 loss there = (0.10−0.098)*160 = $0.32 (< $0.50).
+    # 0.002 → trigger at 0.098; L1 loss there = (0.10−0.098)*80 = $0.16 (< $0.30).
     pm, ex, db = _pm(settings, balance=25.0)
     basket = pm.open_position(_signal(atr=0.001), balance=25.0)
     assert basket.layer_count == 1
@@ -276,14 +278,14 @@ def test_atr_trigger_adds_recovery_layer(settings: Settings):
 
 
 def test_basket_sl_preempts_loss_trigger_recovery(settings: Settings):
-    # Survival-first priority: when a Layer-1 loss reaches the −$0.50 hard-SL floor
+    # Survival-first priority: when a Layer-1 loss reaches the −$0.30 hard-SL floor
     # WITHOUT the ATR trigger having fired (large ATR), the basket is stopped out
     # via 'basket_sl' instead of doubling down with a recovery layer. The recovery
     # code path is unchanged (see test_recovery.py); the hard SL simply outranks it.
     pm, ex, db = _pm(settings, balance=25.0)
     basket = pm.open_position(_signal(atr=1.0), balance=25.0)  # ATR huge → ATR never triggers
     assert basket.layer_count == 1
-    ex.price = 0.0960                                          # L1 loss ≈ $0.64 net → ≤ −$0.50
+    ex.price = 0.0960                                          # L1 loss ≈ $0.33 net → ≤ −$0.30
     pm.manage_baskets([basket], balance=25.0)
     assert basket.status != 'active'
     assert db.trades and db.trades[-1].exit_reason == 'basket_sl'

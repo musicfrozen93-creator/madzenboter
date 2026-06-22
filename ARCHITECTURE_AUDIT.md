@@ -1,11 +1,21 @@
 # ZenGrid Futures Core — Architecture Audit
 
-Dark-Venus basket-recovery core for Binance USDT-M Futures. **10-symbol** correlated
-watchlist (TRX, XRP, XLM, ADA, ALGO, HBAR, VET, LINK, DOT, ATOM), **15m** timeframe,
-default leverage **8×**. Survival-first.
+Dark-Venus basket-recovery core for Binance USDT-M Futures. **20-symbol** correlated
+watchlist (TRX, XRP, XLM, ADA, ALGO, HBAR, VET, LINK, DOT, ATOM, LTC, POL, ETC,
+BCH, NEAR, EOS, FIL, IOTA, GRT, AVAX), **15m** timeframe, default leverage **8×**.
+Survival-first.
 
-Audit covers the code under `madzenboter-main/madzenboter-main/`. 91 unit tests
-pass. Multi-account platform infrastructure (DB models, encryption, subscriptions,
+> **Rebalance (current build).** Tier 1 L1/L2 **$1/$2** (cap **$3**), Tier 2
+> **$2/$4** (cap **$6**); per-basket size halved and symbol/position caps doubled
+> (Tier 1 **4 sym/8 pos**, Tier 2 **6 sym/12 pos**) so MAX deployed margin is
+> unchanged (Tier 1 4×$3=$12, Tier 2 6×$6=$36). TP ceilings **$0.30/$0.80** (T1),
+> **$0.50/$1.20** (T2); ROI **12%/10%** (TRX **8%/8%**); basket hard SL **−$0.30**;
+> recovery loss trigger **$0.30**; daily **+$2/−$3** (T1), **+$3.5/−$4** (T2).
+> Where the narrative below cites the older $2/$4/$6 numbers, treat them as the
+> superseded values — the live numbers are in this box and the worked-examples table.
+
+Audit covers the code under `madzenboter-main/madzenboter-main/`. Full unit suite
+passes. Multi-account platform infrastructure (DB models, encryption, subscriptions,
 admin, logging, exchange execution) is unchanged.
 
 ---
@@ -377,13 +387,13 @@ and `BASKET_SL_HIT` for the new paths.
 
 | Scenario | Basket | Closes via | At ≈ |
 |----------|--------|-----------|------|
-| Tier 1 L1 exit | L1 $2 (non-TRX) | `roi_l1` (12%) | $0.24 net |
-| Tier 1 recovery exit | L1 $2 + L2 $4 = $6 | `roi_recovery` (10%) | $0.60 net |
-| Tier 2 L1 exit | L1 $4 (non-TRX) | `roi_l1` (10%) | $0.40 net |
-| Tier 2 recovery exit | L1 $4 + L2 $8 = $12 | `roi_recovery` (10%) | $1.20 net |
-| TRX L1 exit | L1 $2 | `roi_l1` (8%) | $0.16 net |
-| TRX recovery exit | L1 $2 + L2 $4 = $6 | `roi_recovery` (8%) | $0.48 net |
-| Basket SL exit | any basket | `basket_sl` | −$0.50 net |
+| Tier 1 L1 exit | L1 $1 (non-TRX) | `roi_l1` (12%) | $0.12 net |
+| Tier 1 recovery exit | L1 $1 + L2 $2 = $3 | `roi_recovery` (10%) | $0.30 net |
+| Tier 2 L1 exit | L1 $2 (non-TRX) | `roi_l1` (10%) | $0.20 net |
+| Tier 2 recovery exit | L1 $2 + L2 $4 = $6 | `roi_recovery` (10%) | $0.60 net |
+| TRX L1 exit | L1 $1 | `roi_l1` (8%) | $0.08 net |
+| TRX recovery exit | L1 $1 + L2 $2 = $3 | `roi_recovery` (8%) | $0.24 net |
+| Basket SL exit | any basket | `basket_sl` | −$0.30 net |
 | TP lock activation | target reached | freeze + persist `tp_lock_<id>` | on first hit |
 | TP lock execution | position flat + confirmed | release lock, `TP_LOCK_EXECUTED` | on confirmed close |
 

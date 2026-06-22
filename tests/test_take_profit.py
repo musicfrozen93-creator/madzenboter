@@ -27,12 +27,12 @@ def _basket(margins, side='long', tier='tier1') -> Basket:
 
 def test_target_uses_basket_tier_and_layer_count(settings: Settings):
     tp = TakeProfitManager(settings)
-    # Tier 1: $0.50 (L1) / $1.50 (L1+L2)
-    assert tp.target_usd(_basket([2.0], tier='tier1')) == 0.50
-    assert tp.target_usd(_basket([2.0, 4.0], tier='tier1')) == 1.50
-    # Tier 2: $0.80 (L1) / $2.00 (L1+L2)
-    assert tp.target_usd(_basket([4.0], tier='tier2')) == 0.80
-    assert tp.target_usd(_basket([4.0, 8.0], tier='tier2')) == 2.00
+    # Tier 1: $0.30 (L1) / $0.80 (L1+L2)
+    assert tp.target_usd(_basket([2.0], tier='tier1')) == 0.30
+    assert tp.target_usd(_basket([2.0, 4.0], tier='tier1')) == 0.80
+    # Tier 2: $0.50 (L1) / $1.20 (L1+L2)
+    assert tp.target_usd(_basket([4.0], tier='tier2')) == 0.50
+    assert tp.target_usd(_basket([4.0, 8.0], tier='tier2')) == 1.20
 
 
 def test_tier1_layer1_closes_at_half_dollar(settings: Settings):
@@ -55,7 +55,7 @@ def test_tier2_recovery_requires_two_dollars(settings: Settings):
 def test_unknown_tier_falls_back_to_tier1(settings: Settings):
     tp = TakeProfitManager(settings)
     # A basket whose volatility isn't a known tier id uses Tier 1 targets.
-    assert tp.target_usd(_basket([2.0], tier='legacy')) == 0.50
+    assert tp.target_usd(_basket([2.0], tier='legacy')) == 0.30
 
 
 def test_short_side_profit(settings: Settings):

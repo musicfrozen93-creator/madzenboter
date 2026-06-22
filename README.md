@@ -2,8 +2,9 @@
 
 A lightweight, survival-first **basket recovery** trading core for Binance
 USDT-M Futures, inspired by the Dark Venus model. It trades a curated list of
-10 liquid, correlated USDT-M pairs on the 15-minute timeframe using mean-reversion
-entries, a controlled 2-layer recovery basket, and dollar + ROI basket take-profit.
+20 liquid, correlated USDT-M pairs on the 15-minute timeframe using mean-reversion
+entries, a controlled 2-layer recovery basket, ROI + dollar basket take-profit,
+and a per-basket hard stop-loss.
 
 The goal is **not** maximum profit. The priority order is:
 
@@ -19,11 +20,13 @@ Profit is never prioritised over survival.
 ## Supported Symbols (watchlist — ONLY these are traded)
 
 `TRXUSDT`, `XRPUSDT`, `XLMUSDT`, `ADAUSDT`, `ALGOUSDT`, `HBARUSDT`, `VETUSDT`,
-`LINKUSDT`, `DOTUSDT`, `ATOMUSDT` — 10 correlated pairs.
+`LINKUSDT`, `DOTUSDT`, `ATOMUSDT`, `LTCUSDT`, `POLUSDT`, `ETCUSDT`, `BCHUSDT`,
+`NEARUSDT`, `EOSUSDT`, `FILUSDT`, `IOTAUSDT`, `GRTUSDT`, `AVAXUSDT` — 20 correlated pairs.
 
 No other symbols are ever traded. Timeframe is **15-minute candles only**.
 Expanding the watchlist only adds candidate setups — tier sizing, exposure caps,
-layer count, and per-account position limits still bound all risk.
+layer count, and per-account position limits (max active symbols / max positions)
+remain the final authority and still bound all risk.
 
 ---
 
@@ -59,16 +62,18 @@ Uses `BTCUSDT` 15m:
 - **Layer 1:** fixed tier margin, opened on the entry signal.
 - **Layer 2:** the single recovery layer (2× Layer-1 margin), activated on a
   **hybrid trigger** — whichever occurs first of: Layer-1 drawdown ≥ `ATR(14) × 2`
-  (`ATR_TRIGGER`), or Layer-1 floating loss ≥ `$0.50` (`LOSS_TRIGGER`). ATR
+  (`ATR_TRIGGER`), or Layer-1 floating loss ≥ `$0.30` (`LOSS_TRIGGER`). ATR
   spacing is volatility-adjusted, never fixed grid spacing.
 
-The **entire basket** closes together on the **first** of two conditions (both
+The **entire basket** closes together on the **first** of these conditions (all
 net of fees), for **every** basket:
 
-1. **Fixed-USD target** — Layer 1 only $0.50/$0.80, recovery $1.50/$2.00.
-2. **ROI target** — `net PnL / total margin ≥ tier ROI` (Tier 1 12%, Tier 2 10%):
-   - Layer-1-only → $0.24 (T1) / $0.40 (T2), logs `ROI_L1_EXIT`
-   - Recovery → $0.60 (T1) / $1.20 (T2), logs `ROI_RECOVERY_EXIT`
+1. **ROI target** — `net PnL / total margin ≥ tier ROI` (Tier 1 12%, Tier 2 10%;
+   **TRX 8%/8%** override):
+   - Layer-1-only → $0.12 (T1) / $0.20 (T2), logs `ROI_L1_EXIT`
+   - Recovery → $0.30 (T1) / $0.60 (T2), logs `ROI_RECOVERY_EXIT`
+2. **Fixed-USD target (ceiling)** — Layer 1 only $0.30/$0.50, recovery $0.80/$1.20.
+3. **Basket hard stop-loss** — net basket PnL ≤ **−$0.30** → close as `basket_sl`.
 
 The ROI dollar amount sits below the matching USD target, so a profitable basket
 closes earlier (frees capital, faster profit realisation, improves turnover)
@@ -86,28 +91,33 @@ sizing, no dynamic/adaptive/volatility sizing, no martingale.
 
 | Setting | Tier 1 ($20–$39.99) | Tier 2 ($40+) |
 |---------|---------------------|----------------|
-| Layer 1 margin | $2 | $4 |
-| Layer 2 margin | $4 | $8 |
-| Max basket exposure | $6 | $12 |
-| Basket TP (Layer 1) | $0.50 | $0.80 |
-| Basket TP (Layer 1 + 2) | $1.50 | $2.00 |
-| Layer-1 ROI target | 12% (→ $0.24) | 10% (→ $0.40) |
-| Recovery ROI target (≥2 layers) | 10% (→ $0.60) | 10% (→ $1.20) |
-| Daily profit target | $3 | $4 |
+| Layer 1 margin | $1 | $2 |
+| Layer 2 margin | $2 | $4 |
+| Max basket exposure | $3 | $6 |
+| Basket TP ceiling (Layer 1) | $0.30 | $0.50 |
+| Basket TP ceiling (Layer 1 + 2) | $0.80 | $1.20 |
+| Layer-1 ROI target | 12% (→ $0.12) | 10% (→ $0.20) |
+| Recovery ROI target (≥2 layers) | 10% (→ $0.30) | 10% (→ $0.60) |
+| Basket hard stop-loss (net) | −$0.30 | −$0.30 |
+| Daily profit target | $2 | $3.50 |
 | Daily loss limit | $3 | $4 |
-| Max active symbols | 2 | 3 |
-| Max positions | 4 | 6 |
+| Max active symbols | 4 | 6 |
+| Max positions | 8 | 12 |
 | Death-protection floor (equity) | $15 | $30 |
 
-Balances below $20 have no tier and do not trade.
+TRX uses an 8% / 8% ROI override (L1 / recovery). Balances below $20 have no
+tier and do not trade. Per-basket size was halved versus the prior build while
+symbol/position caps doubled, so the **max total deployed margin is unchanged**
+(Tier 1: 4×$3 = $12; Tier 2: 6×$6 = $36) — more frequency/diversification, same
+worst-case exposure.
 
 ### Account rules
 
 | Rule | Value |
 |------|-------|
 | Leverage (default / admin override / never exceed) | 8× / 5×–10× / 10× |
-| Max active symbols | 2 (Tier 1) / 3 (Tier 2) |
-| Max positions | 4 (Tier 1) / 6 (Tier 2) |
+| Max active symbols | 4 (Tier 1) / 6 (Tier 2) |
+| Max positions | 8 (Tier 1) / 12 (Tier 2) |
 | Max basket per symbol | 1 |
 | Max layers per basket | 2 |
 | Same-symbol cooldown after a close | 15 min |
@@ -255,12 +265,15 @@ Key values:
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
-| `supported_symbols` | TRX/XRP/XLM | the only tradeable pairs |
+| `supported_symbols` | 20 correlated pairs (TRX…AVAX) | the only tradeable pairs |
 | `timeframe` | `15m` | candle interval |
 | `default_leverage` / `min` / `max` / `hard_max` | 8 / 5 / 10 / 10 | leverage policy |
 | `min_tier_balance` | 20.0 | below this → no tier, no trading |
 | `account_tiers` | tier1 / tier2 | per-tier sizing, caps, TP, daily limits, position limits, death floor |
 | `layer2_atr_multiplier` | 2.0 | Layer-2 distance = ATR×2 |
+| `recovery_loss_trigger_usd` | 0.30 | Layer-1 floating loss that also triggers Layer 2 |
+| `basket_hard_sl_usd` | 0.30 | per-basket hard stop-loss (net) → `basket_sl` |
+| `symbol_roi_overrides` | TRX 8%/8% | per-symbol ROI target overrides |
 | `correlation_min_score_first` / `_additional` | 2 / 3 | min signal score for 0 / 1+ active baskets |
 | `max_basket_per_symbol` | 1 | never two baskets on one symbol |
 | `symbol_cooldown_seconds` | 900 | 15-min same-symbol cooldown after a close |

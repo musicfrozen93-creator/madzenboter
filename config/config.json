@@ -4,7 +4,9 @@
     "supported_symbols": [
         "TRX/USDT:USDT", "XRP/USDT:USDT", "XLM/USDT:USDT", "ADA/USDT:USDT",
         "ALGO/USDT:USDT", "HBAR/USDT:USDT", "VET/USDT:USDT", "LINK/USDT:USDT",
-        "DOT/USDT:USDT", "ATOM/USDT:USDT"
+        "DOT/USDT:USDT", "ATOM/USDT:USDT", "LTC/USDT:USDT", "POL/USDT:USDT",
+        "ETC/USDT:USDT", "BCH/USDT:USDT", "NEAR/USDT:USDT", "EOS/USDT:USDT",
+        "FIL/USDT:USDT", "IOTA/USDT:USDT", "GRT/USDT:USDT", "AVAX/USDT:USDT"
     ],
     "btc_symbol": "BTC/USDT:USDT",
 
@@ -35,35 +37,35 @@
     "account_tiers": [
         {
             "id": "tier1", "max_balance": 40.0,
-            "layer1_margin": 2.0, "layer2_margin": 4.0,
-            "max_basket_exposure": 6.0,
-            "basket_tp_l1": 0.50, "basket_tp_l2": 1.50,
+            "layer1_margin": 1.0, "layer2_margin": 2.0,
+            "max_basket_exposure": 3.0,
+            "basket_tp_l1": 0.30, "basket_tp_l2": 0.80,
             "layer1_roi_target": 0.12, "recovery_roi_target": 0.10,
-            "daily_profit_target": 3.0, "daily_loss_limit": 3.0,
-            "max_active_symbols": 2, "max_positions": 4,
+            "daily_profit_target": 2.0, "daily_loss_limit": 3.0,
+            "max_active_symbols": 4, "max_positions": 8,
             "protection_floor": 15.0
         },
         {
             "id": "tier2", "max_balance": 999999999,
-            "layer1_margin": 4.0, "layer2_margin": 8.0,
-            "max_basket_exposure": 12.0,
-            "basket_tp_l1": 0.80, "basket_tp_l2": 2.00,
+            "layer1_margin": 2.0, "layer2_margin": 4.0,
+            "max_basket_exposure": 6.0,
+            "basket_tp_l1": 0.50, "basket_tp_l2": 1.20,
             "layer1_roi_target": 0.10, "recovery_roi_target": 0.10,
-            "daily_profit_target": 4.0, "daily_loss_limit": 4.0,
-            "max_active_symbols": 3, "max_positions": 6,
+            "daily_profit_target": 3.5, "daily_loss_limit": 4.0,
+            "max_active_symbols": 6, "max_positions": 12,
             "protection_floor": 30.0
         }
     ],
     "min_notional_floor": 5.0,
 
-    "basket_hard_sl_usd": 0.50,
+    "basket_hard_sl_usd": 0.30,
     "symbol_roi_overrides": {
         "TRX/USDT:USDT": {"layer1_roi_target": 0.08, "recovery_roi_target": 0.08}
     },
 
     "recovery_max_layers": 2,
     "layer2_atr_multiplier": 2.0,
-    "recovery_loss_trigger_usd": 0.50,
+    "recovery_loss_trigger_usd": 0.30,
 
     "max_basket_per_symbol": 1,
     "correlation_min_score_first": 2,

@@ -13,7 +13,7 @@ strategy is deliberately minimal and identical for every account:
   • Basket take-profit closes the whole basket at a fixed USDT profit target
   • FIXED position sizing — account balance never changes margin, position
     count, recovery size, or layer count
-  • Per-account daily profit target ($5) and daily loss limit ($3)
+  • Per-account daily profit target and daily loss limit (per-tier)
 
 Multi-account platform fields (DATABASE_URL, MASTER_ENCRYPTION_KEY, admin API)
 are preserved unchanged so the existing infrastructure keeps working.
@@ -95,6 +95,16 @@ class Settings:
             'LINK/USDT:USDT',
             'DOT/USDT:USDT',
             'ATOM/USDT:USDT',
+            'LTC/USDT:USDT',
+            'POL/USDT:USDT',
+            'ETC/USDT:USDT',
+            'BCH/USDT:USDT',
+            'NEAR/USDT:USDT',
+            'EOS/USDT:USDT',
+            'FIL/USDT:USDT',
+            'IOTA/USDT:USDT',
+            'GRT/USDT:USDT',
+            'AVAX/USDT:USDT',
         ]
     )
     btc_symbol: str = 'BTC/USDT:USDT'
@@ -142,31 +152,34 @@ class Settings:
     # changes such as deposits/withdrawals). There is no balance scaling, no
     # percentage sizing, no dynamic/adaptive/volatility sizing, no martingale.
     #
-    #   Tier 1 ($20–$39.99) L1 $2 L2 $4 cap $6  daily ±$3  2 sym/4 pos  death <$15
-    #   Tier 2 ($40+)       L1 $4 L2 $8 cap $12 daily ±$4  3 sym/6 pos  death <$30
+    #   Tier 1 ($20–$39.99) L1 $1 L2 $2 cap $3  daily +$2/−$3  4 sym/8 pos  death <$15
+    #   Tier 2 ($40+)       L1 $2 L2 $4 cap $6  daily +$3.5/−$4 6 sym/12 pos death <$30
+    # Rebalance: per-basket size halved and symbol/position caps doubled, so the
+    # MAX total deployed margin is unchanged (Tier 1: 4×$3=$12; Tier 2: 6×$6=$36)
+    # while diversification, trade frequency, and basket turnover rise.
     min_tier_balance: float = 20.0
     account_tiers: list = field(
         default_factory=lambda: [
             {
                 'id': 'tier1', 'max_balance': 40.0,
-                'layer1_margin': 2.0, 'layer2_margin': 4.0,
-                'max_basket_exposure': 6.0,
-                'basket_tp_l1': 0.50, 'basket_tp_l2': 1.50,
+                'layer1_margin': 1.0, 'layer2_margin': 2.0,
+                'max_basket_exposure': 3.0,
+                'basket_tp_l1': 0.30, 'basket_tp_l2': 0.80,
                 # Recovery ROI normalized to 10% (was 12%) for faster recovery
-                # exits; reward stays proportional to the larger $6 total margin.
+                # exits; reward stays proportional to the $3 total margin.
                 'layer1_roi_target': 0.12, 'recovery_roi_target': 0.10,
-                'daily_profit_target': 3.0, 'daily_loss_limit': 3.0,
-                'max_active_symbols': 2, 'max_positions': 4,
+                'daily_profit_target': 2.0, 'daily_loss_limit': 3.0,
+                'max_active_symbols': 4, 'max_positions': 8,
                 'protection_floor': 15.0,
             },
             {
                 'id': 'tier2', 'max_balance': float('inf'),
-                'layer1_margin': 4.0, 'layer2_margin': 8.0,
-                'max_basket_exposure': 12.0,
-                'basket_tp_l1': 0.80, 'basket_tp_l2': 2.00,
+                'layer1_margin': 2.0, 'layer2_margin': 4.0,
+                'max_basket_exposure': 6.0,
+                'basket_tp_l1': 0.50, 'basket_tp_l2': 1.20,
                 'layer1_roi_target': 0.10, 'recovery_roi_target': 0.10,
-                'daily_profit_target': 4.0, 'daily_loss_limit': 4.0,
-                'max_active_symbols': 3, 'max_positions': 6,
+                'daily_profit_target': 3.5, 'daily_loss_limit': 4.0,
+                'max_active_symbols': 6, 'max_positions': 12,
                 'protection_floor': 30.0,
             },
         ]
@@ -182,7 +195,7 @@ class Settings:
     # guards (which still fire first when breached) and never weakens them — it
     # only adds an earlier, per-basket cut. Applies to Layer-1 AND recovery
     # baskets, every supported symbol.
-    basket_hard_sl_usd: float = 0.50
+    basket_hard_sl_usd: float = 0.30
 
     # ── Per-symbol ROI overrides (exit ROI target lookup) ──
     # The default ROI targets live on the tier (layer1_roi_target /
@@ -203,7 +216,7 @@ class Settings:
     #   B) Layer 1 floating loss ≥ recovery_loss_trigger_usd (USDT).
     # Volatility-adjusted spacing — NOT fixed grid spacing.
     layer2_atr_multiplier: float = 2.0
-    recovery_loss_trigger_usd: float = 0.50
+    recovery_loss_trigger_usd: float = 0.30
 
     # ── Position limits (max active symbols / total positions are PER-TIER) ──
     max_basket_per_symbol: int = 1          # never two baskets on one symbol
@@ -427,6 +440,17 @@ class Settings:
                 issues.append(f'{tid}: protection_floor must be > 0')
             if tier.get('protection_floor', 0) >= tier.get('max_balance', float('inf')) and tier['max_balance'] != float('inf'):
                 issues.append(f'{tid}: protection_floor should be below the tier ceiling')
+            # Smaller per-layer margins must still clear the exchange dust floor:
+            # Layer-1 notional = margin × leverage must be ≥ min_notional_floor,
+            # else the smallest entry would be rejected as a dust order.
+            l1_notional = tier.get('layer1_margin', 0) * self.default_leverage
+            if l1_notional + 1e-9 < self.min_notional_floor:
+                issues.append(
+                    f'{tid}: layer1 notional {l1_notional:.2f} (margin×leverage) '
+                    f'is below min_notional_floor {self.min_notional_floor:.2f}'
+                )
+        if self.recovery_loss_trigger_usd <= 0:
+            issues.append('recovery_loss_trigger_usd must be > 0')
         if self.correlation_min_score_additional < self.correlation_min_score_first:
             issues.append('correlation_min_score_additional must be >= correlation_min_score_first')
         if self.bb_period < 2:

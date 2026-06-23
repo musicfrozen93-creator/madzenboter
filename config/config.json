@@ -1,0 +1,97 @@
+{
+    "use_testnet": false,
+
+    "supported_symbols": [
+        "SOL/USDT:USDT", "XRP/USDT:USDT", "BNB/USDT:USDT", "DOGE/USDT:USDT",
+        "ADA/USDT:USDT", "AVAX/USDT:USDT", "LINK/USDT:USDT", "DOT/USDT:USDT",
+        "TRX/USDT:USDT", "LTC/USDT:USDT", "BCH/USDT:USDT", "NEAR/USDT:USDT",
+        "SUI/USDT:USDT", "TON/USDT:USDT", "APT/USDT:USDT", "ATOM/USDT:USDT",
+        "UNI/USDT:USDT", "FIL/USDT:USDT", "ETC/USDT:USDT", "XLM/USDT:USDT",
+        "ARB/USDT:USDT", "OP/USDT:USDT", "INJ/USDT:USDT", "SEI/USDT:USDT",
+        "TIA/USDT:USDT", "AAVE/USDT:USDT", "RUNE/USDT:USDT", "FET/USDT:USDT",
+        "RENDER/USDT:USDT", "IMX/USDT:USDT", "STX/USDT:USDT", "LDO/USDT:USDT",
+        "CRV/USDT:USDT", "DYDX/USDT:USDT", "GRT/USDT:USDT", "ALGO/USDT:USDT",
+        "ICP/USDT:USDT", "HBAR/USDT:USDT", "VET/USDT:USDT", "POL/USDT:USDT",
+        "SAND/USDT:USDT", "MANA/USDT:USDT", "AXS/USDT:USDT", "GALA/USDT:USDT",
+        "EGLD/USDT:USDT", "THETA/USDT:USDT", "FLOW/USDT:USDT", "CHZ/USDT:USDT",
+        "ENS/USDT:USDT", "KSM/USDT:USDT", "ENA/USDT:USDT", "ONDO/USDT:USDT",
+        "JUP/USDT:USDT", "PYTH/USDT:USDT", "JTO/USDT:USDT", "WLD/USDT:USDT",
+        "BLUR/USDT:USDT", "MASK/USDT:USDT", "COMP/USDT:USDT", "SNX/USDT:USDT",
+        "SUSHI/USDT:USDT", "1INCH/USDT:USDT", "AR/USDT:USDT", "ROSE/USDT:USDT",
+        "CELO/USDT:USDT", "ANKR/USDT:USDT", "IOTA/USDT:USDT", "QTUM/USDT:USDT",
+        "WAVES/USDT:USDT", "NEO/USDT:USDT", "DASH/USDT:USDT", "ZEC/USDT:USDT",
+        "BAT/USDT:USDT", "ZRX/USDT:USDT", "YFI/USDT:USDT", "BAL/USDT:USDT",
+        "GMT/USDT:USDT", "APE/USDT:USDT", "CFX/USDT:USDT", "ARKM/USDT:USDT",
+        "JASMY/USDT:USDT", "SKL/USDT:USDT", "LRC/USDT:USDT", "STORJ/USDT:USDT",
+        "RSR/USDT:USDT", "S/USDT:USDT", "ORDI/USDT:USDT", "1000PEPE/USDT:USDT",
+        "WIF/USDT:USDT", "1000BONK/USDT:USDT", "1000FLOKI/USDT:USDT",
+        "1000SHIB/USDT:USDT", "1000SATS/USDT:USDT", "MEME/USDT:USDT",
+        "TURBO/USDT:USDT", "PEOPLE/USDT:USDT", "NEIRO/USDT:USDT", "MEW/USDT:USDT",
+        "FXS/USDT:USDT", "GMX/USDT:USDT"
+    ],
+    "btc_symbol": "BTC/USDT:USDT",
+
+    "timeframe": "15m",
+    "candle_limit": 300,
+
+    "loop_interval_seconds": 10,
+    "signal_eval_interval_seconds": 30,
+
+    "rsi_period": 14,
+    "rsi_oversold": 30.0,
+    "rsi_overbought": 70.0,
+    "bb_period": 20,
+    "bb_std": 2.0,
+    "atr_period": 14,
+
+    "btc_filter_enabled": true,
+    "btc_ema_fast": 50,
+    "btc_ema_slow": 200,
+    "btc_regime_cache_seconds": 300,
+
+    "default_leverage": 10,
+    "min_leverage": 8,
+    "max_leverage": 10,
+    "hard_max_leverage": 10,
+
+    "min_tier_balance": 20.0,
+    "account_tiers": [
+        {
+            "id": "tier1", "max_balance": 40.0,
+            "margin_per_trade": 0.8,
+            "daily_profit_target": 2.0, "daily_loss_limit": 3.0,
+            "max_active_symbols": 8, "max_positions": 8,
+            "protection_floor": 15.0
+        },
+        {
+            "id": "tier2", "max_balance": 999999999,
+            "margin_per_trade": 1.5,
+            "daily_profit_target": 3.5, "daily_loss_limit": 4.0,
+            "max_active_symbols": 10, "max_positions": 10,
+            "protection_floor": 30.0
+        }
+    ],
+    "min_notional_floor": 5.0,
+
+    "tp_margin_pct": 0.25,
+    "sl_margin_pct": 0.12,
+
+    "atr_entry_min_pct": 0.003,
+    "atr_entry_max_pct": 0.012,
+    "min_signal_score": 1,
+
+    "max_basket_per_symbol": 1,
+
+    "risk_filter_lookback": 30,
+    "max_spread_pct": 0.0010,
+    "atr_explosion_multiplier": 2.5,
+    "news_candle_atr_multiplier": 2.5,
+    "volume_spike_multiplier": 3.0,
+
+    "symbol_cooldown_seconds": 900,
+
+    "taker_fee_pct": 0.0005,
+
+    "database_url": "postgresql://trading_bot:trading_bot@localhost:5432/trading_bot",
+    "log_level": "INFO"
+}

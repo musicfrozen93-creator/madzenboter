@@ -24,7 +24,7 @@ martingale, no grid expansion.**
 | Tier 2 ($40+) | margin $1.5, 10 positions, daily +$3.5/−$4, floor $30 |
 | Take-profit | 20% of margin (net) → T1 $0.16 / T2 $0.30 |
 | Stop-loss | 12% of margin (net) → T1 $0.096 / T2 $0.18 |
-| Portfolio profit lock | arm/flatten → T1 $0.50/$0.35 · T2 $0.80/$0.50 |
+| Portfolio profit lock | dynamic trail `max(floor, peak×band%)` — arm/floor T1 $0.50/$0.35 · T2 $0.80/$0.50; bands 70→85% |
 | Symbol cooldown | 30 min (symbol-specific) after a close |
 | ATR entry band | 0.30% ≤ ATR/price ≤ 1.20% |
 | Min signal score | 1 (of 0–4) |
@@ -62,11 +62,13 @@ priority order:
 
 - **P0 — Account death protection:** equity < tier floor → `protection_lock` + close all (permanent).
 - **P1 — Daily loss limit:** realised + unrealised ≤ −tier limit → close all + lock.
-- **P1.5 — Portfolio trailing profit lock:** arms when total open unrealised PnL
-  ≥ tier trigger ($0.50 T1 / $0.80 T2), then flattens ALL positions
-  (`portfolio_profit_lock`) if the aggregate gives back to the tier floor ($0.35
-  T1 / $0.50 T2). Per-account, resets when flat / on new day, independent of the
-  daily profit lock.
+- **P1.5 — Portfolio trailing profit lock (dynamic):** arms when total open
+  unrealised PnL ≥ tier trigger ($0.50 T1 / $0.80 T2), stores the running peak,
+  and flattens ALL positions (`portfolio_profit_lock`) the moment current profit
+  drops below `protected = max(floor, peak × band%)`. The protection % ratchets
+  up with the peak (T1 70/75/80/85% at peaks ≥0.50/1.00/1.50/2.00; T2 same % at
+  peaks ≥0.80/2.00/3.00/4.00) and the protected level never falls. Per-account,
+  resets when flat / on new day, independent of the daily profit lock.
 - **P2 — Position exit:** net ≥ `tp_margin_pct × margin` (20%) → `tp` (TP-locked close); net ≤ −`sl_margin_pct × margin` (12%) → `sl`.
 
 Daily profit target latches the new-entry lock (no closing). Both targets use
@@ -126,7 +128,7 @@ orphaned TP lock, and starts the cooldown.
 |--------|---------|-------|
 | `tp` | net ≥ tp_margin_pct × margin (20%) | this position (TP-locked, immediate) |
 | `sl` | net ≤ −sl_margin_pct × margin (12%) | this position |
-| `portfolio_profit_lock` | armed aggregate gave back to tier floor | ALL positions, lock resets when flat |
+| `portfolio_profit_lock` | armed aggregate fell below `max(floor, peak×band%)` | ALL positions, lock resets when flat |
 | `daily_loss_limit` | realised + unrealised ≤ −tier limit | ALL positions, lock to UTC reset |
 | `protection_lock` | equity < tier floor | ALL positions, permanent lock |
 | `force_close_all` | admin force-close | ALL positions |

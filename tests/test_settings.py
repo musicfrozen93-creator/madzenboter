@@ -81,7 +81,10 @@ def test_portfolio_lock_thresholds_per_tier(settings: Settings):
     t1, t2 = settings.get_tier(25.0), settings.get_tier(50.0)
     assert t1['portfolio_lock_trigger'] == 0.50 and t1['portfolio_lock_floor'] == 0.35
     assert t2['portfolio_lock_trigger'] == 0.80 and t2['portfolio_lock_floor'] == 0.50
-    # Trigger must always exceed the give-back floor.
+    # Dynamic protection bands [peak_threshold, pct].
+    assert t1['portfolio_protection_bands'] == [[0.50, 0.70], [1.00, 0.75], [1.50, 0.80], [2.00, 0.85]]
+    assert t2['portfolio_protection_bands'] == [[0.80, 0.70], [2.00, 0.75], [3.00, 0.80], [4.00, 0.85]]
+    # Trigger must always exceed the minimum-protected floor.
     for t in settings.account_tiers:
         assert t['portfolio_lock_trigger'] > t['portfolio_lock_floor'] > 0
 

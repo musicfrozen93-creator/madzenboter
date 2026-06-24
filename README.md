@@ -40,7 +40,7 @@ The priority order is:
 | Max positions | 8 | 10 |
 | Daily profit target | $2 | $3.5 |
 | Daily loss limit | $3 | $4 |
-| Portfolio lock — arm / flatten | $0.50 / $0.35 | $0.80 / $0.50 |
+| Portfolio lock — arm / floor (dynamic trail) | $0.50 / $0.35 | $0.80 / $0.50 |
 | Death-protection floor (equity) | $15 | $30 |
 
 Sizing is fixed within a tier: no balance scaling, no percentage sizing, no
@@ -120,17 +120,27 @@ The account-level guards outrank everything, in order:
 
 Daily profit target latches a new-entry lock (no closing).
 
-### Portfolio trailing profit lock (per-account)
+### Portfolio trailing profit lock (per-account, dynamic)
 
-A per-account aggregate profit protector. When the account's **total open
-unrealised PnL** reaches the tier **trigger** the lock arms and stores the peak;
-if the aggregate then **gives back to the tier floor**, all positions are closed
-with reason `portfolio_profit_lock`.
+A per-account aggregate profit protector with a **dynamic trailing** stop. When
+the account's **total open unrealised PnL** reaches the tier **arm trigger** the
+lock arms and stores the running **peak**. From then on it protects
 
-| Tier | Arm at | Flatten when it falls to |
-|------|--------|--------------------------|
-| Tier 1 | ≥ $0.50 | ≤ $0.35 |
-| Tier 2 | ≥ $0.80 | ≤ $0.50 |
+```
+protected = max(floor, peak × protection%)
+```
+
+where the protection percentage **ratchets up** as the peak grows. The moment
+current profit falls **below** the protected level, all positions are closed with
+reason `portfolio_profit_lock`. The protected level never falls.
+
+| Tier | Arm at | Protection bands (peak → % protected) | Floor |
+|------|--------|----------------------------------------|-------|
+| Tier 1 | ≥ $0.50 | ≥0.50→70% · ≥1.00→75% · ≥1.50→80% · ≥2.00→85% | $0.35 |
+| Tier 2 | ≥ $0.80 | ≥0.80→70% · ≥2.00→75% · ≥3.00→80% · ≥4.00→85% | $0.50 |
+
+Examples — **Tier 1:** peak $0.50→protect $0.35, $1.00→$0.75, $1.50→$1.20,
+$2.00→$1.70. **Tier 2:** peak $0.80→$0.56, $2.00→$1.50, $3.00→$2.40, $4.00→$3.40.
 
 It is **per-account** (never affects another account), **resets** once all
 positions close and on the new UTC day, and is **independent of and compatible
@@ -273,7 +283,8 @@ Key values:
 | `account_tiers` | tier1 / tier2 | per-tier margin, position cap, daily limits, death floor |
 | `tp_margin_pct` | 0.20 | take-profit = 20% of margin (net) |
 | `sl_margin_pct` | 0.12 | stop-loss = 12% of margin (net) |
-| `account_tiers[].portfolio_lock_trigger` / `_floor` | T1 0.50/0.35 · T2 0.80/0.50 | portfolio trailing profit lock |
+| `account_tiers[].portfolio_lock_trigger` / `_floor` | T1 0.50/0.35 · T2 0.80/0.50 | arm trigger + protected floor |
+| `account_tiers[].portfolio_protection_bands` | T1/T2 70→85% bands | dynamic trail: `protected = max(floor, peak × band%)` |
 | `atr_entry_min_pct` / `_max_pct` | 0.003 / 0.012 | ATR feasibility band |
 | `min_signal_score` | 1 | minimum signal-strength score (0–4) |
 | `max_basket_per_symbol` | 1 | never two positions on one symbol |

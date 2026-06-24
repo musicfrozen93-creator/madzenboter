@@ -67,6 +67,9 @@ class RiskManager:
         self.database.set_state('daily_limit_date', today)
         self.database.set_state('daily_profit_locked', 'false')
         self.database.set_state('daily_loss_locked', 'false')
+        # The per-account portfolio trailing profit lock also resets each UTC day.
+        self.database.set_state('portfolio_profit_locked', 'false')
+        self.database.set_state('peak_portfolio_profit', '')
         logger.info('Daily reset: start balance=%.2f for %s', balance, today)
 
     def _check_daily_reset(self, current_balance: float) -> None:
@@ -182,6 +185,77 @@ class RiskManager:
 
     def is_daily_profit_locked(self) -> bool:
         return self._locked('daily_profit_locked')
+
+    # ───────────────────────────────────────────
+    # Portfolio trailing profit lock (per-account)
+    # ───────────────────────────────────────────
+
+    def is_portfolio_profit_locked(self) -> bool:
+        """True if the portfolio trailing profit lock is currently armed."""
+        return self._locked('portfolio_profit_locked')
+
+    def update_portfolio_profit_lock(self, open_unrealized: float, tier: dict) -> bool:
+        """Arm / trail / fire the per-account portfolio trailing profit lock.
+
+        Uses TOTAL open unrealised PnL across the account's positions (never
+        wallet balance), so deposits/withdrawals can never move it. Behaviour:
+
+          • Not armed → ARM when ``open_unrealized >= portfolio_lock_trigger``,
+            storing ``peak_portfolio_profit``. Arming never closes (returns False).
+          • Armed → trail the stored peak, then return True when
+            ``open_unrealized <= portfolio_lock_floor`` (the caller must close
+            ALL positions with reason 'portfolio_profit_lock').
+
+        Per-account and DB-persisted (account-isolated). Independent of, and
+        compatible with, the daily profit lock. Cleared by
+        ``reset_portfolio_profit_lock`` (after all positions close) and by the
+        UTC-day reset.
+        """
+        trigger = float(tier.get('portfolio_lock_trigger', 0.0))
+        floor_lvl = float(tier.get('portfolio_lock_floor', 0.0))
+        if trigger <= 0 or floor_lvl <= 0:
+            return False
+
+        if not self.is_portfolio_profit_locked():
+            if open_unrealized >= trigger:
+                self.database.set_state('portfolio_profit_locked', 'true')
+                self.database.set_state('peak_portfolio_profit', str(open_unrealized))
+                logger.info(
+                    'PORTFOLIO_PROFIT_LOCK_ARMED | %s | unrealized=%.4f >= trigger=%.2f '
+                    '(give-back floor=%.2f)',
+                    tier['id'], open_unrealized, trigger, floor_lvl,
+                )
+            return False
+
+        # Armed: trail the peak upward.
+        try:
+            peak = float(self.database.get_state('peak_portfolio_profit') or 0.0)
+        except (TypeError, ValueError):
+            peak = 0.0
+        if open_unrealized > peak:
+            peak = open_unrealized
+            self.database.set_state('peak_portfolio_profit', str(peak))
+
+        if open_unrealized <= floor_lvl:
+            logger.warning(
+                'PORTFOLIO_PROFIT_LOCK | %s | unrealized=%.4f <= floor=%.2f (peak=%.4f) '
+                '— closing ALL positions.',
+                tier['id'], open_unrealized, floor_lvl, peak,
+            )
+            return True
+        return False
+
+    def reset_portfolio_profit_lock(self) -> None:
+        """Clear the portfolio profit lock + peak (after all positions close).
+
+        Idempotent and write-light: only touches the DB when a lock is actually
+        set, so calling it every management cycle with no open positions is cheap.
+        """
+        if self.database.get_state('portfolio_profit_locked') in (None, '', 'false'):
+            return
+        self.database.set_state('portfolio_profit_locked', 'false')
+        self.database.set_state('peak_portfolio_profit', '')
+        logger.info('PORTFOLIO_PROFIT_LOCK reset (positions flat / new day)')
 
     # ───────────────────────────────────────────
     # Account death protection (PERMANENT, admin reset only)

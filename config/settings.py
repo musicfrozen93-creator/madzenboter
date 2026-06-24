@@ -13,7 +13,8 @@ strategy is deliberately minimal and identical for every account:
   • SINGLE ENTRY — exactly one position per symbol. NO recovery, NO Layer 2,
     NO averaging down, NO martingale, NO grid expansion.
   • Fixed take-profit and stop-loss expressed as a percentage of the position
-    margin (TP 25% / SL 12%)
+    margin (TP 20% / SL 12%)
+  • Per-account portfolio trailing profit lock (flatten on aggregate give-back)
   • FIXED position sizing — account balance never changes margin or position
     count (balance only selects the tier)
   • Per-account daily profit target and daily loss limit (per-tier)
@@ -175,7 +176,9 @@ class Settings:
     # no dynamic/adaptive/volatility sizing, no martingale.
     #
     #   Tier 1 ($20–$39.99)  margin $0.8  8 positions   daily +$2/−$3   death <$15
+    #                        portfolio lock: arm ≥$0.50, flatten on give-back to $0.35
     #   Tier 2 ($40+)        margin $1.5  10 positions   daily +$3.5/−$4 death <$30
+    #                        portfolio lock: arm ≥$0.80, flatten on give-back to $0.50
     # SINGLE ENTRY: one position per symbol, so max_positions == max_active_symbols.
     min_tier_balance: float = 20.0
     account_tiers: list = field(
@@ -186,6 +189,7 @@ class Settings:
                 'daily_profit_target': 2.0, 'daily_loss_limit': 3.0,
                 'max_active_symbols': 8, 'max_positions': 8,
                 'protection_floor': 15.0,
+                'portfolio_lock_trigger': 0.50, 'portfolio_lock_floor': 0.35,
             },
             {
                 'id': 'tier2', 'max_balance': float('inf'),
@@ -193,6 +197,7 @@ class Settings:
                 'daily_profit_target': 3.5, 'daily_loss_limit': 4.0,
                 'max_active_symbols': 10, 'max_positions': 10,
                 'protection_floor': 30.0,
+                'portfolio_lock_trigger': 0.80, 'portfolio_lock_floor': 0.50,
             },
         ]
     )
@@ -203,7 +208,9 @@ class Settings:
     # Both are evaluated on NET PnL (gross − round-trip fees). A position closes
     # on the FIRST of: net ≥ tp_margin_pct × margin (reason 'tp') or
     # net ≤ −sl_margin_pct × margin (reason 'sl').
-    tp_margin_pct: float = 0.25
+    #   TP 20% → Tier 1 $0.16 / Tier 2 $0.30
+    #   SL 12% → Tier 1 $0.096 / Tier 2 $0.18
+    tp_margin_pct: float = 0.20
     sl_margin_pct: float = 0.12
 
     # ── ATR feasibility band (entry gate) ──
@@ -231,7 +238,9 @@ class Settings:
     volume_spike_multiplier: float = 3.0    # last volume > 3× average volume
 
     # ── Same-symbol cooldown after a position closes (per-account, persisted) ──
-    symbol_cooldown_seconds: int = 900      # 15 min (one 15m candle)
+    # After a position closes on a symbol, NO new position on the SAME symbol for
+    # this window; other symbols are unaffected (symbol-specific).
+    symbol_cooldown_seconds: int = 1800     # 30 min
 
     # ── Fees (used for net-profit estimation on TP/SL) ──
     # Realistic Binance USDT-M taker fee (0.05%). Round-trip = 2× = 0.10% notional.
@@ -427,6 +436,14 @@ class Settings:
                 issues.append(f'{tid}: max_positions must be >= max_active_symbols')
             if tier.get('protection_floor', 0) <= 0:
                 issues.append(f'{tid}: protection_floor must be > 0')
+            # Portfolio trailing profit lock: arm trigger must exceed the
+            # give-back floor, and both must be positive.
+            trig = tier.get('portfolio_lock_trigger', 0)
+            floor_lvl = tier.get('portfolio_lock_floor', 0)
+            if trig <= 0 or floor_lvl <= 0:
+                issues.append(f'{tid}: portfolio_lock_trigger/floor must be > 0')
+            elif trig <= floor_lvl:
+                issues.append(f'{tid}: portfolio_lock_trigger must exceed portfolio_lock_floor')
             if tier.get('protection_floor', 0) >= tier.get('max_balance', float('inf')) and tier['max_balance'] != float('inf'):
                 issues.append(f'{tid}: protection_floor should be below the tier ceiling')
             # The position notional = margin × leverage must clear the exchange

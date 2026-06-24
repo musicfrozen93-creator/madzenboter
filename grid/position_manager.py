@@ -276,6 +276,11 @@ class PositionManager:
         """
         active = [b for b in baskets if b.status == 'active' and b.layer_count > 0]
         if not active:
+            # No open positions → the portfolio trailing profit lock resets.
+            try:
+                self.risk_manager.reset_portfolio_profit_lock()
+            except Exception as e:
+                logger.debug('portfolio lock reset failed: %s', e)
             return []
 
         # Account tier for daily limits — balance ONLY selects the tier; falls
@@ -315,6 +320,16 @@ class PositionManager:
         # fires before losses are realised, regardless of deposits/withdrawals.
         if self.risk_manager.check_loss_limit(total_unrealized, tier):
             self.close_all_baskets(active, 'daily_loss_limit')
+            return []
+
+        # ── PRIORITY 1.5: portfolio trailing profit lock ──
+        # Per-account: arms once total open unrealised PnL reaches the tier
+        # trigger ($0.50 T1 / $0.80 T2), then flattens ALL positions if the
+        # aggregate gives back to the floor ($0.35 T1 / $0.50 T2). Independent of
+        # and compatible with the daily profit lock; resets once positions close.
+        if self.risk_manager.update_portfolio_profit_lock(total_unrealized, tier):
+            self.close_all_baskets(active, 'portfolio_profit_lock')
+            self.risk_manager.reset_portfolio_profit_lock()
             return []
 
         # Latch the daily profit target lock (blocks new entries only).
@@ -378,10 +393,17 @@ class PositionManager:
                         extra=self._log_extra,
                     )
 
-                # ── Take-profit → TP LOCK ──
-                # Committing to the close NOW and freezing the decision prevents a
-                # post-target reversal from leaving a profitable position open.
+                # ── Take-profit → IMMEDIATE TP LOCK + close (same cycle) ──
+                # The moment the TP condition is true we log TP_DETECTED, freeze
+                # the exit with the TP lock, and submit the close order in THIS
+                # cycle — no waiting, no TP re-evaluation. A post-target reversal
+                # can never leave a profitable position open.
                 if exit_reason == 'tp':
+                    trade_logger.info(
+                        'TP_DETECTED | account=%s symbol=%s pnl=%.4f target=%.4f timestamp=%.0f',
+                        self.account_id, basket.symbol, m['net_pnl'], m['tp_target'],
+                        time.time(), extra=self._log_extra,
+                    )
                     self._activate_tp_lock(basket, exit_reason, m)
                     if not self._execute_tp_locked_close(basket, exit_reason, price):
                         remaining.append(basket)  # exchange busy — retry next cycle
@@ -444,10 +466,11 @@ class PositionManager:
         except Exception as e:
             logger.error('Failed to persist TP lock for %s: %s', basket.id[:8], e)
         trade_logger.info(
-            'TP_LOCK_ACTIVATED | account=%s symbol=%s roi=%.2f%% pnl=%.4f '
-            'target_hit=%s activation_time=%.0f',
-            self.account_id, basket.symbol, m.get('roi', 0.0) * 100,
-            m.get('net_pnl', 0.0), reason, activation_time, extra=self._log_extra,
+            'TP_LOCK_ACTIVATED | account=%s symbol=%s pnl=%.4f target=%.4f roi=%.2f%% '
+            'reason=%s timestamp=%.0f',
+            self.account_id, basket.symbol, m.get('net_pnl', 0.0),
+            m.get('tp_target', 0.0), m.get('roi', 0.0) * 100, reason,
+            activation_time, extra=self._log_extra,
         )
 
     def _release_tp_lock(self, basket: Basket) -> None:
@@ -471,6 +494,10 @@ class PositionManager:
         ``close_basket`` itself already retries the close order and continues on
         partial fills; this layer adds the persistent, across-restart guarantee.
         """
+        trade_logger.info(
+            'TP_CLOSE_SENT | account=%s symbol=%s reason=%s timestamp=%.0f',
+            self.account_id, basket.symbol, reason, time.time(), extra=self._log_extra,
+        )
         trade = self.close_basket(basket, reason)
         if basket.status != 'closed':
             logger.warning(
@@ -485,6 +512,11 @@ class PositionManager:
             (final_pnl / trade.margin) if (trade and trade.margin > 0) else 0.0
         )
         self._release_tp_lock(basket)
+        trade_logger.info(
+            'TP_CLOSE_CONFIRMED | account=%s symbol=%s pnl=%.4f target=%s timestamp=%.0f',
+            self.account_id, basket.symbol, final_pnl, reason, time.time(),
+            extra=self._log_extra,
+        )
         trade_logger.info(
             'TP_LOCK_EXECUTED | account=%s symbol=%s final_pnl=%.4f final_roi=%.2f%% '
             'execution_time=%.0f close_reason=%s',

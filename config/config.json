@@ -61,19 +61,21 @@
             "margin_per_trade": 0.8,
             "daily_profit_target": 2.0, "daily_loss_limit": 3.0,
             "max_active_symbols": 8, "max_positions": 8,
-            "protection_floor": 15.0
+            "protection_floor": 15.0,
+            "portfolio_lock_trigger": 0.50, "portfolio_lock_floor": 0.35
         },
         {
             "id": "tier2", "max_balance": 999999999,
             "margin_per_trade": 1.5,
             "daily_profit_target": 3.5, "daily_loss_limit": 4.0,
             "max_active_symbols": 10, "max_positions": 10,
-            "protection_floor": 30.0
+            "protection_floor": 30.0,
+            "portfolio_lock_trigger": 0.80, "portfolio_lock_floor": 0.50
         }
     ],
     "min_notional_floor": 5.0,
 
-    "tp_margin_pct": 0.25,
+    "tp_margin_pct": 0.20,
     "sl_margin_pct": 0.12,
 
     "atr_entry_min_pct": 0.003,
@@ -88,7 +90,7 @@
     "news_candle_atr_multiplier": 2.5,
     "volume_spike_multiplier": 3.0,
 
-    "symbol_cooldown_seconds": 900,
+    "symbol_cooldown_seconds": 1800,
 
     "taker_fee_pct": 0.0005,
 

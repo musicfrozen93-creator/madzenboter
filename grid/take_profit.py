@@ -8,9 +8,9 @@ on the FIRST of two conditions, both evaluated on NET profit
   TP) net PnL ≥ tp_margin_pct × margin   → reason 'tp'
   SL) net PnL ≤ −sl_margin_pct × margin  → reason 'sl'
 
-With the approved spec (TP 25% / SL 12% of margin) a Tier-1 position
-(margin $0.8) targets +$0.20 / −$0.096, and a Tier-2 position (margin $1.5)
-targets +$0.375 / −$0.18. The take-profit sits at the account-level guards'
+With the approved spec (TP 20% / SL 12% of margin) a Tier-1 position
+(margin $0.8) targets +$0.16 / −$0.096, and a Tier-2 position (margin $1.5)
+targets +$0.30 / −$0.18. The take-profit sits at the account-level guards'
 side: the daily loss limit and death-protection floor still fire first when
 breached — the per-position SL only adds an earlier, bounded per-position cut.
 """

@@ -322,11 +322,12 @@ class PositionManager:
             self.close_all_baskets(active, 'daily_loss_limit')
             return []
 
-        # ── PRIORITY 1.5: portfolio trailing profit lock ──
+        # ── PRIORITY 1.5: portfolio trailing profit lock (dynamic) ──
         # Per-account: arms once total open unrealised PnL reaches the tier
-        # trigger ($0.50 T1 / $0.80 T2), then flattens ALL positions if the
-        # aggregate gives back to the floor ($0.35 T1 / $0.50 T2). Independent of
-        # and compatible with the daily profit lock; resets once positions close.
+        # trigger ($0.50 T1 / $0.80 T2), trails the peak, and flattens ALL
+        # positions the moment current profit drops below the dynamic protected
+        # level max(floor, peak × band%) (protection % ratchets up 70→85% with the
+        # peak). Independent of the daily profit lock; resets once positions close.
         if self.risk_manager.update_portfolio_profit_lock(total_unrealized, tier):
             self.close_all_baskets(active, 'portfolio_profit_lock')
             self.risk_manager.reset_portfolio_profit_lock()

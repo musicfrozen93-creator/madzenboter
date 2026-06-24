@@ -62,7 +62,8 @@
             "daily_profit_target": 2.0, "daily_loss_limit": 3.0,
             "max_active_symbols": 8, "max_positions": 8,
             "protection_floor": 15.0,
-            "portfolio_lock_trigger": 0.50, "portfolio_lock_floor": 0.35
+            "portfolio_lock_trigger": 0.50, "portfolio_lock_floor": 0.35,
+            "portfolio_protection_bands": [[0.50, 0.70], [1.00, 0.75], [1.50, 0.80], [2.00, 0.85]]
         },
         {
             "id": "tier2", "max_balance": 999999999,
@@ -70,7 +71,8 @@
             "daily_profit_target": 3.5, "daily_loss_limit": 4.0,
             "max_active_symbols": 10, "max_positions": 10,
             "protection_floor": 30.0,
-            "portfolio_lock_trigger": 0.80, "portfolio_lock_floor": 0.50
+            "portfolio_lock_trigger": 0.80, "portfolio_lock_floor": 0.50,
+            "portfolio_protection_bands": [[0.80, 0.70], [2.00, 0.75], [3.00, 0.80], [4.00, 0.85]]
         }
     ],
     "min_notional_floor": 5.0,

@@ -176,9 +176,9 @@ class Settings:
     # no dynamic/adaptive/volatility sizing, no martingale.
     #
     #   Tier 1 ($20–$39.99)  margin $0.8  8 positions   daily +$2/−$3   death <$15
-    #                        portfolio lock: arm ≥$0.50, flatten on give-back to $0.35
+    #                        portfolio lock: arm ≥$0.50, trail to max($0.35, peak×band%)
     #   Tier 2 ($40+)        margin $1.5  10 positions   daily +$3.5/−$4 death <$30
-    #                        portfolio lock: arm ≥$0.80, flatten on give-back to $0.50
+    #                        portfolio lock: arm ≥$0.80, trail to max($0.50, peak×band%)
     # SINGLE ENTRY: one position per symbol, so max_positions == max_active_symbols.
     min_tier_balance: float = 20.0
     account_tiers: list = field(
@@ -189,7 +189,12 @@ class Settings:
                 'daily_profit_target': 2.0, 'daily_loss_limit': 3.0,
                 'max_active_symbols': 8, 'max_positions': 8,
                 'protection_floor': 15.0,
+                # Portfolio trailing profit lock: arm at $0.50, then protect
+                # max(floor $0.35, peak × band%). Bands are [peak_threshold, pct].
                 'portfolio_lock_trigger': 0.50, 'portfolio_lock_floor': 0.35,
+                'portfolio_protection_bands': [
+                    [0.50, 0.70], [1.00, 0.75], [1.50, 0.80], [2.00, 0.85],
+                ],
             },
             {
                 'id': 'tier2', 'max_balance': float('inf'),
@@ -198,6 +203,9 @@ class Settings:
                 'max_active_symbols': 10, 'max_positions': 10,
                 'protection_floor': 30.0,
                 'portfolio_lock_trigger': 0.80, 'portfolio_lock_floor': 0.50,
+                'portfolio_protection_bands': [
+                    [0.80, 0.70], [2.00, 0.75], [3.00, 0.80], [4.00, 0.85],
+                ],
             },
         ]
     )
@@ -437,13 +445,33 @@ class Settings:
             if tier.get('protection_floor', 0) <= 0:
                 issues.append(f'{tid}: protection_floor must be > 0')
             # Portfolio trailing profit lock: arm trigger must exceed the
-            # give-back floor, and both must be positive.
+            # minimum-protected floor, and both must be positive.
             trig = tier.get('portfolio_lock_trigger', 0)
             floor_lvl = tier.get('portfolio_lock_floor', 0)
             if trig <= 0 or floor_lvl <= 0:
                 issues.append(f'{tid}: portfolio_lock_trigger/floor must be > 0')
             elif trig <= floor_lvl:
                 issues.append(f'{tid}: portfolio_lock_trigger must exceed portfolio_lock_floor')
+            # Dynamic protection bands [peak_threshold, pct]: non-empty, ascending
+            # thresholds, pct in (0, 1], and the lowest band must be reachable at
+            # the arm trigger (lowest threshold <= trigger).
+            bands = tier.get('portfolio_protection_bands') or []
+            if not bands:
+                issues.append(f'{tid}: portfolio_protection_bands must not be empty')
+            else:
+                prev_thr = -1.0
+                for band in bands:
+                    if len(band) != 2:
+                        issues.append(f'{tid}: each protection band must be [peak_threshold, pct]')
+                        continue
+                    thr, pct = float(band[0]), float(band[1])
+                    if thr <= prev_thr:
+                        issues.append(f'{tid}: protection band thresholds must strictly ascend')
+                    if not (0 < pct <= 1):
+                        issues.append(f'{tid}: protection band pct must be in (0, 1]')
+                    prev_thr = thr
+                if float(bands[0][0]) > trig + 1e-9:
+                    issues.append(f'{tid}: lowest protection band threshold must be <= arm trigger')
             if tier.get('protection_floor', 0) >= tier.get('max_balance', float('inf')) and tier['max_balance'] != float('inf'):
                 issues.append(f'{tid}: protection_floor should be below the tier ceiling')
             # The position notional = margin × leverage must clear the exchange

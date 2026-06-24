@@ -22,8 +22,10 @@ martingale, no grid expansion.**
 | Leverage | 10× (admin override 8×–10×, hard cap 10×) |
 | Tier 1 ($20–39.99) | margin $0.8, 8 positions, daily +$2/−$3, floor $15 |
 | Tier 2 ($40+) | margin $1.5, 10 positions, daily +$3.5/−$4, floor $30 |
-| Take-profit | 25% of margin (net) → T1 $0.20 / T2 $0.375 |
+| Take-profit | 20% of margin (net) → T1 $0.16 / T2 $0.30 |
 | Stop-loss | 12% of margin (net) → T1 $0.096 / T2 $0.18 |
+| Portfolio profit lock | arm/flatten → T1 $0.50/$0.35 · T2 $0.80/$0.50 |
+| Symbol cooldown | 30 min (symbol-specific) after a close |
 | ATR entry band | 0.30% ≤ ATR/price ≤ 1.20% |
 | Min signal score | 1 (of 0–4) |
 | Taker fee model | 0.05% (round-trip 0.10% of notional) |
@@ -60,10 +62,20 @@ priority order:
 
 - **P0 — Account death protection:** equity < tier floor → `protection_lock` + close all (permanent).
 - **P1 — Daily loss limit:** realised + unrealised ≤ −tier limit → close all + lock.
-- **P2 — Position exit:** net ≥ `tp_margin_pct × margin` → `tp` (TP-locked close); net ≤ −`sl_margin_pct × margin` → `sl`.
+- **P1.5 — Portfolio trailing profit lock:** arms when total open unrealised PnL
+  ≥ tier trigger ($0.50 T1 / $0.80 T2), then flattens ALL positions
+  (`portfolio_profit_lock`) if the aggregate gives back to the tier floor ($0.35
+  T1 / $0.50 T2). Per-account, resets when flat / on new day, independent of the
+  daily profit lock.
+- **P2 — Position exit:** net ≥ `tp_margin_pct × margin` (20%) → `tp` (TP-locked close); net ≤ −`sl_margin_pct × margin` (12%) → `sl`.
 
 Daily profit target latches the new-entry lock (no closing). Both targets use
 **net** PnL (gross − round-trip taker fees). There is **no recovery layer step**.
+
+**Immediate TP execution:** when the TP condition becomes true the bot, in the
+**same management cycle**, logs `TP_DETECTED`, activates + persists the TP lock,
+and submits the close (`TP_CLOSE_SENT` → `TP_CLOSE_CONFIRMED`) — no wait for a
+later cycle, no TP re-evaluation. A hit target can never keep running.
 
 ## TP Lock (exit-execution guarantee)
 
@@ -112,8 +124,9 @@ orphaned TP lock, and starts the cooldown.
 
 | Reason | Trigger | Scope |
 |--------|---------|-------|
-| `tp` | net ≥ tp_margin_pct × margin | this position (TP-locked) |
-| `sl` | net ≤ −sl_margin_pct × margin | this position |
+| `tp` | net ≥ tp_margin_pct × margin (20%) | this position (TP-locked, immediate) |
+| `sl` | net ≤ −sl_margin_pct × margin (12%) | this position |
+| `portfolio_profit_lock` | armed aggregate gave back to tier floor | ALL positions, lock resets when flat |
 | `daily_loss_limit` | realised + unrealised ≤ −tier limit | ALL positions, lock to UTC reset |
 | `protection_lock` | equity < tier floor | ALL positions, permanent lock |
 | `force_close_all` | admin force-close | ALL positions |

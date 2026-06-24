@@ -28,13 +28,13 @@ def _pos(margin: float, side='long', tier='tier1') -> Basket:
 
 def test_tp_sl_targets_scale_with_margin(settings: Settings):
     tp = TakeProfitManager(settings)
-    # Tier 1: margin $0.8 → TP 25% = $0.20, SL 12% = $0.096.
+    # Tier 1: margin $0.8 → TP 20% = $0.16, SL 12% = $0.096.
     b1 = _pos(0.8, tier='tier1')
-    assert abs(tp.tp_target_usd(b1) - 0.20) < 1e-9
+    assert abs(tp.tp_target_usd(b1) - 0.16) < 1e-9
     assert abs(tp.sl_target_usd(b1) - 0.096) < 1e-9
-    # Tier 2: margin $1.5 → TP $0.375, SL $0.18.
+    # Tier 2: margin $1.5 → TP $0.30, SL $0.18.
     b2 = _pos(1.5, tier='tier2')
-    assert abs(tp.tp_target_usd(b2) - 0.375) < 1e-9
+    assert abs(tp.tp_target_usd(b2) - 0.30) < 1e-9
     assert abs(tp.sl_target_usd(b2) - 0.18) < 1e-9
 
 
@@ -82,7 +82,7 @@ def test_unknown_tier_still_uses_global_pcts(settings: Settings):
     # TP/SL are global percentages of margin — no tier lookup needed.
     tp = TakeProfitManager(settings)
     b = _pos(0.8, tier='legacy')
-    assert abs(tp.tp_target_usd(b) - 0.20) < 1e-9
+    assert abs(tp.tp_target_usd(b) - 0.16) < 1e-9
     assert abs(tp.sl_target_usd(b) - 0.096) < 1e-9
 
 

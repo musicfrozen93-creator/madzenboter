@@ -216,6 +216,24 @@ def test_stop_loss_exit_closes_position(settings: Settings):
     assert db.trades and db.trades[-1].exit_reason == 'sl'
 
 
+# ── Symbol-specific cooldown (30 min) after a close ──
+
+def test_symbol_cooldown_blocks_same_symbol_after_close(settings: Settings):
+    pm, ex, db = _pm(settings, balance=25.0)
+    b = pm.open_position(_signal(symbol='SOL/USDT:USDT'), balance=25.0)
+    assert b is not None
+    # Close SOL via take-profit → starts the 30-min cooldown on SOL.
+    ex.price = PRICE + 0.0035
+    pm.manage_baskets([b], balance=25.0)
+    assert db.trades and db.trades[-1].exit_reason == 'tp'
+    assert pm.settings.symbol_cooldown_seconds == 1800
+    # SOL is now in cooldown → a new SOL entry is blocked.
+    ex.price = PRICE
+    assert pm.open_position(_signal(symbol='SOL/USDT:USDT'), balance=25.0) is None
+    # A DIFFERENT symbol (XRP) is unaffected — cooldown is symbol-specific.
+    assert pm.open_position(_signal(symbol='XRP/USDT:USDT'), balance=25.0) is not None
+
+
 # ── Account death protection ──
 
 def test_open_blocked_when_balance_below_protection_floor(settings: Settings):

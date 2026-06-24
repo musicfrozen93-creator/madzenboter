@@ -23,8 +23,9 @@ The priority order is:
 | Universe | **Fixed 100 USDT-M perps** (scans only these) |
 | Timeframe | **15m** |
 | Leverage | **10×** (admin override 8×–10×, hard cap 10×) |
-| Take-profit | **25% of margin** (net) |
+| Take-profit | **20% of margin** (net) |
 | Stop-loss | **12% of margin** (net) |
+| Portfolio profit lock | per-account trailing flatten (per-tier) |
 | BTC | trend **filter only** (never traded) |
 | ETH | **excluded** (min-notional too high for tier margins) |
 
@@ -34,11 +35,12 @@ The priority order is:
 |---------|---------------------|----------------|
 | Margin per trade | $0.8 | $1.5 |
 | Position notional @10× | $8 | $15 |
-| Take-profit (25%) | $0.20 | $0.375 |
+| Take-profit (20%) | $0.16 | $0.30 |
 | Stop-loss (12%) | $0.096 | $0.18 |
 | Max positions | 8 | 10 |
 | Daily profit target | $2 | $3.5 |
 | Daily loss limit | $3 | $4 |
+| Portfolio lock — arm / flatten | $0.50 / $0.35 | $0.80 / $0.50 |
 | Death-protection floor (equity) | $15 | $30 |
 
 Sizing is fixed within a tier: no balance scaling, no percentage sizing, no
@@ -98,19 +100,42 @@ Uses `BTCUSDT` 15m:
 
 Both targets are evaluated on **net** PnL (gross − round-trip taker fees):
 
-1. **Take-profit** — net ≥ `tp_margin_pct × margin` (25%) → reason `tp`.
+1. **Take-profit** — net ≥ `tp_margin_pct × margin` (20%) → reason `tp`.
 2. **Stop-loss** — net ≤ −`sl_margin_pct × margin` (12%) → reason `sl`.
 
-A reached take-profit is **committed and frozen** by the persistent **TP lock**
-so a post-target reversal can never re-open it; the lock is only released after a
-confirmed flat close. The account-level guards still outrank everything:
+**Immediate TP execution:** the moment the TP condition is true the bot — in the
+**same management cycle** — logs `TP_DETECTED`, activates + persists the **TP
+lock**, and submits the close (`TP_CLOSE_SENT` → `TP_CLOSE_CONFIRMED`). It does
+not wait for a later cycle and does not re-evaluate TP, so a position that hit
+its target can never keep running. The lock is only released after a confirmed
+flat close.
+
+The account-level guards outrank everything, in order:
 
 - **P0 — Account death protection:** equity < tier floor → permanent
   `protection_lock` + close all positions (admin reset only).
 - **P1 — Daily loss limit:** realised + unrealised ≤ −tier limit → close all + lock until next UTC day.
+- **P1.5 — Portfolio trailing profit lock:** see below.
 - **P2 — Position exit:** take-profit (TP lock + close) or stop-loss (`sl`).
 
 Daily profit target latches a new-entry lock (no closing).
+
+### Portfolio trailing profit lock (per-account)
+
+A per-account aggregate profit protector. When the account's **total open
+unrealised PnL** reaches the tier **trigger** the lock arms and stores the peak;
+if the aggregate then **gives back to the tier floor**, all positions are closed
+with reason `portfolio_profit_lock`.
+
+| Tier | Arm at | Flatten when it falls to |
+|------|--------|--------------------------|
+| Tier 1 | ≥ $0.50 | ≤ $0.35 |
+| Tier 2 | ≥ $0.80 | ≤ $0.50 |
+
+It is **per-account** (never affects another account), **resets** once all
+positions close and on the new UTC day, and is **independent of and compatible
+with** the daily profit lock (which only blocks new entries). It does not block
+new entries itself.
 
 ---
 
@@ -121,7 +146,7 @@ Daily profit target latches a new-entry lock (no closing).
 | Leverage (default / admin override / never exceed) | 10× / 8×–10× / 10× |
 | Max positions | 8 (Tier 1) / 10 (Tier 2) |
 | Positions per symbol | 1 (single entry) |
-| Same-symbol cooldown after a close | 15 min |
+| Same-symbol cooldown after a close | 30 min (symbol-specific) |
 | Daily profit target | stop new trades until next UTC day |
 | Daily loss limit | close all positions immediately, lock until next UTC day |
 
@@ -210,7 +235,7 @@ main.py                  CLI entry point
 | File | Content |
 |------|---------|
 | `logs/bot.log` | Main operations |
-| `logs/trades.log` | OPEN / CLOSE / TP_LOCK / SL_HIT events |
+| `logs/trades.log` | OPEN / CLOSE / SL_HIT events · TP fast-path (`TP_DETECTED`, `TP_LOCK_ACTIVATED`, `TP_CLOSE_SENT`, `TP_CLOSE_CONFIRMED`) · `PORTFOLIO_PROFIT_LOCK` |
 | `logs/execution.log` | Per-account execution |
 | `logs/control.log` | Control-plane events |
 | `logs/errors.log` | Errors |
@@ -246,12 +271,13 @@ Key values:
 | `default_leverage` / `min` / `max` / `hard_max` | 10 / 8 / 10 / 10 | leverage policy |
 | `min_tier_balance` | 20.0 | below this → no tier, no trading |
 | `account_tiers` | tier1 / tier2 | per-tier margin, position cap, daily limits, death floor |
-| `tp_margin_pct` | 0.25 | take-profit = 25% of margin (net) |
+| `tp_margin_pct` | 0.20 | take-profit = 20% of margin (net) |
 | `sl_margin_pct` | 0.12 | stop-loss = 12% of margin (net) |
+| `account_tiers[].portfolio_lock_trigger` / `_floor` | T1 0.50/0.35 · T2 0.80/0.50 | portfolio trailing profit lock |
 | `atr_entry_min_pct` / `_max_pct` | 0.003 / 0.012 | ATR feasibility band |
 | `min_signal_score` | 1 | minimum signal-strength score (0–4) |
 | `max_basket_per_symbol` | 1 | never two positions on one symbol |
-| `symbol_cooldown_seconds` | 900 | 15-min same-symbol cooldown after a close |
+| `symbol_cooldown_seconds` | 1800 | 30-min same-symbol cooldown after a close |
 | `taker_fee_pct` | 0.0005 | realistic Binance taker fee (0.05%) |
 
 Per-tier values (`margin_per_trade`, `daily_profit_target`, `daily_loss_limit`,

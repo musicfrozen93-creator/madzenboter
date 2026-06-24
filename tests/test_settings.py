@@ -68,9 +68,22 @@ def test_tier2_config(settings: Settings):
 
 
 def test_tp_sl_percentages(settings: Settings):
-    assert settings.tp_margin_pct == 0.25
+    assert settings.tp_margin_pct == 0.20
     assert settings.sl_margin_pct == 0.12
     assert settings.tp_margin_pct > settings.sl_margin_pct
+
+
+def test_symbol_cooldown_is_30_minutes(settings: Settings):
+    assert settings.symbol_cooldown_seconds == 1800
+
+
+def test_portfolio_lock_thresholds_per_tier(settings: Settings):
+    t1, t2 = settings.get_tier(25.0), settings.get_tier(50.0)
+    assert t1['portfolio_lock_trigger'] == 0.50 and t1['portfolio_lock_floor'] == 0.35
+    assert t2['portfolio_lock_trigger'] == 0.80 and t2['portfolio_lock_floor'] == 0.50
+    # Trigger must always exceed the give-back floor.
+    for t in settings.account_tiers:
+        assert t['portfolio_lock_trigger'] > t['portfolio_lock_floor'] > 0
 
 
 def test_atr_band_and_signal_score(settings: Settings):

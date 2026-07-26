@@ -6,11 +6,10 @@ framework (daily-start balance, high-water mark, daily stats, emergency
 shutdown). All state is per-account and persisted through the account-isolated
 DB wrapper, so each account's limits are fully independent.
 
-  • Daily Profit Target (per-tier): when daily PnL reaches it, STOP opening new
-    trades for the rest of the UTC day. Existing positions keep being managed.
-  • Daily Loss Limit (per-tier): when total daily PnL (realised + open
-    unrealised) falls to it, CLOSE ALL open positions and STOP trading for the
-    rest of the day.
+  • Daily Profit Target ($5): when realised daily PnL reaches it, STOP opening
+    new trades for the rest of the UTC day. Existing baskets keep being managed.
+  • Daily Loss Limit ($3): when total daily PnL (realised + open unrealised)
+    falls to it, CLOSE ALL open baskets and STOP trading for the rest of the day.
 
 Both limits auto-reset at the start of each UTC day. Priority order of the whole
 system is: survival → drawdown control → consistency → profit.
@@ -67,9 +66,6 @@ class RiskManager:
         self.database.set_state('daily_limit_date', today)
         self.database.set_state('daily_profit_locked', 'false')
         self.database.set_state('daily_loss_locked', 'false')
-        # The per-account portfolio trailing profit lock also resets each UTC day.
-        self.database.set_state('portfolio_profit_locked', 'false')
-        self.database.set_state('peak_portfolio_profit', '')
         logger.info('Daily reset: start balance=%.2f for %s', balance, today)
 
     def _check_daily_reset(self, current_balance: float) -> None:
@@ -163,8 +159,8 @@ class RiskManager:
         """Check the daily loss limit against realised + open unrealised PnL.
 
         Returns True when the tier limit is breached (caller must close ALL
-        positions immediately — do not wait for losses to be realised). Once
-        breached the lock is latched for the rest of the UTC day.
+        baskets and recovery layers immediately — do not wait for losses to be
+        realised). Once breached the lock is latched for the rest of the UTC day.
         """
         if self._locked('daily_loss_locked'):
             return True
@@ -185,115 +181,6 @@ class RiskManager:
 
     def is_daily_profit_locked(self) -> bool:
         return self._locked('daily_profit_locked')
-
-    # ───────────────────────────────────────────
-    # Portfolio trailing profit lock (per-account)
-    # ───────────────────────────────────────────
-
-    def is_portfolio_profit_locked(self) -> bool:
-        """True if the portfolio trailing profit lock is currently armed."""
-        return self._locked('portfolio_profit_locked')
-
-    @staticmethod
-    def _protection_pct(bands, peak: float) -> float:
-        """Protection percentage for a peak from ascending [threshold, pct] bands.
-
-        Returns the pct of the HIGHEST band whose threshold is <= peak (bands are
-        configured strictly ascending, so the last match is the highest band).
-        Returns 0.0 if the peak is below every band threshold.
-        """
-        pct = 0.0
-        for band in (bands or []):
-            try:
-                threshold, band_pct = float(band[0]), float(band[1])
-            except (TypeError, ValueError, IndexError):
-                continue
-            if peak >= threshold:
-                pct = band_pct
-        return pct
-
-    def protected_profit(self, peak: float, tier: dict) -> float:
-        """The dynamic protected-profit level for a given peak.
-
-        protected = max(portfolio_lock_floor, peak × protection_pct(peak)),
-        where the protection percentage steps up through the tier's
-        ``portfolio_protection_bands`` as the peak grows (Tier 1: 70/75/80/85%
-        at peaks ≥ 0.50/1.00/1.50/2.00; Tier 2: 70/75/80/85% at peaks ≥
-        0.80/2.00/3.00/4.00).
-        """
-        floor_lvl = float(tier.get('portfolio_lock_floor', 0.0))
-        pct = self._protection_pct(tier.get('portfolio_protection_bands'), peak)
-        return max(floor_lvl, peak * pct)
-
-    def update_portfolio_profit_lock(self, open_unrealized: float, tier: dict) -> bool:
-        """Arm / trail / fire the per-account DYNAMIC portfolio profit lock.
-
-        Uses TOTAL open unrealised PnL across the account's positions (never
-        wallet balance), so deposits/withdrawals can never move it. Behaviour:
-
-          • Not armed → ARM when ``open_unrealized >= portfolio_lock_trigger``,
-            storing ``peak_portfolio_profit``. Arming never closes (returns False).
-          • Armed → trail the stored peak upward, recompute the DYNAMIC protected
-            level ``protected_profit(peak, tier) = max(floor, peak × band%)``, and
-            return True the moment current profit falls BELOW that protected level
-            (the caller must close ALL positions with reason
-            'portfolio_profit_lock'). As the peak grows, the protected level
-            ratchets up and never falls.
-
-        Per-account and DB-persisted (account-isolated). Independent of, and
-        compatible with, the daily profit lock. Cleared by
-        ``reset_portfolio_profit_lock`` (after all positions close) and by the
-        UTC-day reset.
-        """
-        trigger = float(tier.get('portfolio_lock_trigger', 0.0))
-        floor_lvl = float(tier.get('portfolio_lock_floor', 0.0))
-        if trigger <= 0 or floor_lvl <= 0:
-            return False
-
-        if not self.is_portfolio_profit_locked():
-            if open_unrealized >= trigger:
-                self.database.set_state('portfolio_profit_locked', 'true')
-                self.database.set_state('peak_portfolio_profit', str(open_unrealized))
-                logger.info(
-                    'PORTFOLIO_PROFIT_LOCK_ARMED | %s | unrealized=%.4f >= trigger=%.2f '
-                    '(initial protected=%.4f)',
-                    tier['id'], open_unrealized, trigger,
-                    self.protected_profit(open_unrealized, tier),
-                )
-            return False
-
-        # Armed: trail the peak upward.
-        try:
-            peak = float(self.database.get_state('peak_portfolio_profit') or 0.0)
-        except (TypeError, ValueError):
-            peak = 0.0
-        if open_unrealized > peak:
-            peak = open_unrealized
-            self.database.set_state('peak_portfolio_profit', str(peak))
-
-        # Dynamic protected level (ratchets up with the peak, never down).
-        protected = self.protected_profit(peak, tier)
-        if open_unrealized < protected:
-            pct = self._protection_pct(tier.get('portfolio_protection_bands'), peak)
-            logger.warning(
-                'PORTFOLIO_PROFIT_LOCK | %s | unrealized=%.4f < protected=%.4f '
-                '(peak=%.4f × %.0f%% , floor=%.2f) — closing ALL positions.',
-                tier['id'], open_unrealized, protected, peak, pct * 100, floor_lvl,
-            )
-            return True
-        return False
-
-    def reset_portfolio_profit_lock(self) -> None:
-        """Clear the portfolio profit lock + peak (after all positions close).
-
-        Idempotent and write-light: only touches the DB when a lock is actually
-        set, so calling it every management cycle with no open positions is cheap.
-        """
-        if self.database.get_state('portfolio_profit_locked') in (None, '', 'false'):
-            return
-        self.database.set_state('portfolio_profit_locked', 'false')
-        self.database.set_state('peak_portfolio_profit', '')
-        logger.info('PORTFOLIO_PROFIT_LOCK reset (positions flat / new day)')
 
     # ───────────────────────────────────────────
     # Account death protection (PERMANENT, admin reset only)

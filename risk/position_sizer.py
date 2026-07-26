@@ -1,16 +1,16 @@
 """
 ZenGrid — Position Sizer (FIXED, tier-driven sizing).
 
-Sizing is FIXED per account tier and NEVER scaled by balance. The margin comes
-from the position's locked tier (Tier 1: $0.8; Tier 2: $1.5) and is passed in by
-the position manager — this module only converts a given margin into a valid
-exchange quantity:
+Sizing is FIXED per account tier and NEVER scaled by balance. The margin for a
+layer comes from the basket's locked tier (Tier 1: L1 $2 / L2 $4; Tier 2: L1 $4
+/ L2 $8) and is passed in by the position manager — this module only converts a
+given margin into a valid exchange quantity:
 
   • quantity = (margin × leverage) / price   (floored to the lot step)
 
 No percentage sizing, no balance scaling, no dynamic/adaptive/volatility sizing,
-no martingale, no recovery. The only per-account variable is the admin-set
-leverage (8×–10×, default 10×, never above 10×), resolved in Settings.
+no martingale. The only per-account variable is the admin-set leverage (3×–8×,
+default 5×, never above 10×), resolved in Settings.
 """
 
 import logging

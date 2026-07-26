@@ -1,17 +1,17 @@
-"""Tests for the single-entry scalping settings: universe, leverage, tiers, TP/SL."""
+"""Tests for the Dark-Venus settings: symbols, leverage, sizing, TP targets."""
 
 from config.settings import Settings
 
 
-def test_fixed_universe_is_100_symbols(settings: Settings):
-    assert len(settings.supported_symbols) == 100
-    assert len(set(settings.supported_symbols)) == 100        # no duplicates
-    # A sample of the curated universe is present.
-    for base in ('SOL', 'XRP', 'DOGE', 'LINK', 'TRX', 'ARB', 'INJ', 'WIF'):
+def test_expanded_watchlist(settings: Settings):
+    # Expanded to 20 correlated USDT-M perps.
+    assert len(settings.supported_symbols) == 20
+    for base in ('TRX', 'XRP', 'XLM', 'ADA', 'ALGO', 'HBAR', 'VET', 'LINK', 'DOT', 'ATOM',
+                 'LTC', 'POL', 'ETC', 'BCH', 'NEAR', 'EOS', 'FIL', 'IOTA', 'GRT', 'AVAX'):
         assert settings.is_supported_symbol(f'{base}/USDT:USDT')
-    # BTC and ETH are NEVER traded (BTC is the filter reference only).
+    # Anything outside the list is still blocked.
     assert not settings.is_supported_symbol('BTC/USDT:USDT')
-    assert not settings.is_supported_symbol('ETH/USDT:USDT')
+    assert not settings.is_supported_symbol('DOGE/USDT:USDT')
 
 
 def test_timeframe_is_15m(settings: Settings):
@@ -19,14 +19,15 @@ def test_timeframe_is_15m(settings: Settings):
 
 
 def test_default_and_override_leverage(settings: Settings):
-    assert settings.default_leverage == 10
-    assert settings.leverage == 10
-    # Admin override clamps into [8, 10] and never above the hard cap (10).
-    assert Settings.create_account_settings(settings, {'leverage_override': 9}).leverage == 9
+    assert settings.default_leverage == 8
+    # Master settings always run at default leverage.
+    assert settings.leverage == 8
+    # Admin override clamps into [5, 10] and never above the hard cap (10).
+    assert Settings.create_account_settings(settings, {'leverage_override': 7}).leverage == 7
     assert Settings.create_account_settings(settings, {'leverage_override': 10}).leverage == 10
     assert Settings.create_account_settings(settings, {'leverage_override': 12}).leverage == 10
-    assert Settings.create_account_settings(settings, {'leverage_override': 5}).leverage == 8
-    assert Settings.create_account_settings(settings, {'leverage_override': None}).leverage == 10
+    assert Settings.create_account_settings(settings, {'leverage_override': 3}).leverage == 5
+    assert Settings.create_account_settings(settings, {'leverage_override': None}).leverage == 8
 
 
 def test_never_exceeds_hard_max_leverage(settings: Settings):
@@ -40,7 +41,9 @@ def test_exactly_two_tiers(settings: Settings):
 
 
 def test_tier_boundaries(settings: Settings):
-    assert settings.get_tier(19.99) is None              # below the minimum → no tier
+    # Below the minimum → no tier (must not trade).
+    assert settings.get_tier(19.99) is None
+    # 20–39.99 → Tier 1; 40+ → Tier 2.
     assert settings.get_tier(20.0)['id'] == 'tier1'
     assert settings.get_tier(39.99)['id'] == 'tier1'
     assert settings.get_tier(40.0)['id'] == 'tier2'
@@ -49,70 +52,56 @@ def test_tier_boundaries(settings: Settings):
 
 def test_tier1_config(settings: Settings):
     t = settings.get_tier(25.0)
-    assert t['margin_per_trade'] == 0.8
-    assert t['max_active_symbols'] == 8
-    assert t['max_positions'] == 8
+    assert t['layer1_margin'] == 1.0
+    assert t['layer2_margin'] == 2.0
+    assert t['max_basket_exposure'] == 3.0
+    assert t['basket_tp_l1'] == 0.30
+    assert t['basket_tp_l2'] == 0.80
     assert t['daily_profit_target'] == 2.0
     assert t['daily_loss_limit'] == 3.0
-    assert t['protection_floor'] == 15.0
 
 
 def test_tier2_config(settings: Settings):
     t = settings.get_tier(50.0)
-    assert t['margin_per_trade'] == 1.5
-    assert t['max_active_symbols'] == 10
-    assert t['max_positions'] == 10
+    assert t['layer1_margin'] == 2.0
+    assert t['layer2_margin'] == 4.0
+    assert t['max_basket_exposure'] == 6.0
+    assert t['basket_tp_l1'] == 0.50
+    assert t['basket_tp_l2'] == 1.20
     assert t['daily_profit_target'] == 3.5
     assert t['daily_loss_limit'] == 4.0
-    assert t['protection_floor'] == 30.0
 
 
-def test_tp_sl_percentages(settings: Settings):
-    assert settings.tp_margin_pct == 0.20
-    assert settings.sl_margin_pct == 0.12
-    assert settings.tp_margin_pct > settings.sl_margin_pct
-
-
-def test_symbol_cooldown_is_30_minutes(settings: Settings):
-    assert settings.symbol_cooldown_seconds == 1800
-
-
-def test_portfolio_lock_thresholds_per_tier(settings: Settings):
-    t1, t2 = settings.get_tier(25.0), settings.get_tier(50.0)
-    assert t1['portfolio_lock_trigger'] == 0.50 and t1['portfolio_lock_floor'] == 0.35
-    assert t2['portfolio_lock_trigger'] == 0.80 and t2['portfolio_lock_floor'] == 0.50
-    # Dynamic protection bands [peak_threshold, pct].
-    assert t1['portfolio_protection_bands'] == [[0.50, 0.70], [1.00, 0.75], [1.50, 0.80], [2.00, 0.85]]
-    assert t2['portfolio_protection_bands'] == [[0.80, 0.70], [2.00, 0.75], [3.00, 0.80], [4.00, 0.85]]
-    # Trigger must always exceed the minimum-protected floor.
+def test_tier_layers_fit_exposure(settings: Settings):
+    # L1 + L2 must equal the tier's max basket exposure (never exceed it).
     for t in settings.account_tiers:
-        assert t['portfolio_lock_trigger'] > t['portfolio_lock_floor'] > 0
-
-
-def test_atr_band_and_signal_score(settings: Settings):
-    assert settings.atr_entry_min_pct == 0.003
-    assert settings.atr_entry_max_pct == 0.012
-    assert settings.atr_entry_min_pct < settings.atr_entry_max_pct
-    assert settings.min_signal_score == 1
-
-
-def test_single_entry_one_position_per_symbol(settings: Settings):
-    assert settings.max_basket_per_symbol == 1
-
-
-def test_position_notional_clears_min_notional(settings: Settings):
-    # Tier 1: 0.8 × 10 = $8 ≥ $5 floor; Tier 2: 1.5 × 10 = $15 ≥ $5 floor.
-    floor = settings.min_notional_floor
-    for t in settings.account_tiers:
-        assert t['margin_per_trade'] * settings.default_leverage >= floor
+        assert t['layer1_margin'] + t['layer2_margin'] == t['max_basket_exposure']
 
 
 def test_tier_or_default_below_minimum(settings: Settings):
+    # Managing existing baskets below the min uses the most conservative tier.
     assert settings.get_tier_or_default(10.0)['id'] == 'tier1'
 
 
-def test_realistic_taker_fee(settings: Settings):
-    assert settings.taker_fee_pct == 0.0005
+def test_max_two_layers(settings: Settings):
+    assert settings.recovery_max_layers == 2
+
+
+def test_position_limits_are_per_tier(settings: Settings):
+    assert settings.max_basket_per_symbol == 1
+    t1, t2 = settings.get_tier(25.0), settings.get_tier(50.0)
+    assert t1['max_active_symbols'] == 4 and t1['max_positions'] == 8
+    assert t2['max_active_symbols'] == 6 and t2['max_positions'] == 12
+
+
+def test_protection_floors(settings: Settings):
+    assert settings.get_tier(25.0)['protection_floor'] == 15.0
+    assert settings.get_tier(50.0)['protection_floor'] == 30.0
+
+
+def test_correlation_min_scores(settings: Settings):
+    assert settings.correlation_min_score_first == 2
+    assert settings.correlation_min_score_additional == 3
 
 
 def test_validate_clean(settings: Settings):

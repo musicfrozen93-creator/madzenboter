@@ -1,9 +1,7 @@
 """Integration tests for the mean-reversion signal engine.
 
 A fake exchange returns crafted 15m OHLCV so the entry logic, BTC trend filter,
-pre-trade risk filters, and the ATR feasibility band can be exercised without any
-network. The ATR band is widened in the helpers for the "expects a signal" tests
-(the band is exercised directly in its own tests).
+and pre-trade risk filters can be exercised without any network.
 """
 
 import numpy as np
@@ -13,8 +11,7 @@ from config.settings import Settings
 from signals.indicators import compute_bollinger_bands, compute_rsi
 from signals.signal_engine import SignalEngine
 
-SYMBOL = 'SOL/USDT:USDT'           # a supported symbol
-UNSUPPORTED = 'FOO/USDT:USDT'      # not in the fixed universe
+SYMBOL = 'TRX/USDT:USDT'
 
 
 def _df_from_closes(closes, last_low=None, last_high=None, volumes=None) -> pd.DataFrame:
@@ -63,13 +60,6 @@ class FakeExchange:
         return {'last': last, 'spread': self._spread}
 
 
-def _eng(symbol_df, btc_df, settings: Settings, spread: float = 0.0) -> SignalEngine:
-    """Build an engine with the ATR band widened (band tested separately)."""
-    settings.atr_entry_min_pct = 0.0
-    settings.atr_entry_max_pct = 1.0
-    return SignalEngine(FakeExchange(symbol_df, btc_df, spread), settings)
-
-
 def _trend_with_osc(trend_lo: float, trend_hi: float, n: int = 200, amp: float = 0.08):
     """Linear trend plus a small ±amp oscillation.
 
@@ -95,6 +85,7 @@ def _overbought_short_df(volumes=None) -> pd.DataFrame:
 
 
 def test_oversold_long_setup_is_valid(settings: Settings):
+    # Sanity-check the crafted data actually represents a long setup.
     df = _oversold_long_df()
     rsi = compute_rsi(df['close'], settings.rsi_period).dropna().iloc[-1]
     _, _, lower = compute_bollinger_bands(df['close'], settings.bb_period, settings.bb_std)
@@ -103,7 +94,7 @@ def test_oversold_long_setup_is_valid(settings: Settings):
 
 
 def test_long_signal_with_bullish_btc(settings: Settings):
-    eng = _eng(_oversold_long_df(), _btc_uptrend(), settings)
+    eng = SignalEngine(FakeExchange(_oversold_long_df(), _btc_uptrend()), settings)
     sig = eng.generate_signal(SYMBOL)
     assert sig is not None
     assert sig.side == 'long'
@@ -111,7 +102,9 @@ def test_long_signal_with_bullish_btc(settings: Settings):
 
 
 def test_signal_strength_score_is_scored(settings: Settings):
-    eng = _eng(_oversold_long_df(), _btc_uptrend(), settings)
+    # Strong oversold long under a bullish BTC: extreme RSI (<20) + BTC aligned +
+    # good spread/liquidity ⇒ score >= 3 (capped at 4). Always within 0–4.
+    eng = SignalEngine(FakeExchange(_oversold_long_df(), _btc_uptrend()), settings)
     sig = eng.generate_signal(SYMBOL)
     assert sig is not None
     assert 0 <= sig.strength_score <= 4
@@ -119,55 +112,37 @@ def test_signal_strength_score_is_scored(settings: Settings):
 
 
 def test_long_blocked_by_bearish_btc(settings: Settings):
-    eng = _eng(_oversold_long_df(), _btc_downtrend(), settings)
+    # BTC bearish blocks LONG entries.
+    eng = SignalEngine(FakeExchange(_oversold_long_df(), _btc_downtrend()), settings)
     assert eng.generate_signal(SYMBOL) is None
 
 
 def test_short_signal_with_bearish_btc(settings: Settings):
-    eng = _eng(_overbought_short_df(), _btc_downtrend(), settings)
+    eng = SignalEngine(FakeExchange(_overbought_short_df(), _btc_downtrend()), settings)
     sig = eng.generate_signal(SYMBOL)
     assert sig is not None
     assert sig.side == 'short'
 
 
 def test_short_blocked_by_bullish_btc(settings: Settings):
-    eng = _eng(_overbought_short_df(), _btc_uptrend(), settings)
+    eng = SignalEngine(FakeExchange(_overbought_short_df(), _btc_uptrend()), settings)
     assert eng.generate_signal(SYMBOL) is None
 
 
 def test_unsupported_symbol_rejected(settings: Settings):
-    eng = _eng(_oversold_long_df(), _btc_uptrend(), settings)
-    assert eng.generate_signal(UNSUPPORTED) is None
-    # BTC itself is never traded (filter reference only).
-    assert eng.generate_signal('BTC/USDT:USDT') is None
+    eng = SignalEngine(FakeExchange(_oversold_long_df(), _btc_uptrend()), settings)
+    assert eng.generate_signal('DOGE/USDT:USDT') is None
 
 
 def test_spread_too_high_skips(settings: Settings):
+    # Spread above max_spread_pct → skip even a valid setup.
     big_spread = 95.0 * (settings.max_spread_pct * 5)
-    eng = _eng(_oversold_long_df(), _btc_uptrend(), settings, spread=big_spread)
+    eng = SignalEngine(FakeExchange(_oversold_long_df(), _btc_uptrend(), spread=big_spread), settings)
     assert eng.generate_signal(SYMBOL) is None
 
 
 def test_volume_spike_skips(settings: Settings):
     vols = [1000.0] * 200
     vols[-1] = 1000.0 * (settings.volume_spike_multiplier + 1)  # spike on last bar
-    eng = _eng(_oversold_long_df(volumes=vols), _btc_uptrend(), settings)
+    eng = SignalEngine(FakeExchange(_oversold_long_df(volumes=vols), _btc_uptrend()), settings)
     assert eng.generate_signal(SYMBOL) is None
-
-
-# ── ATR feasibility band ──
-
-def test_atr_band_rejects_out_of_band(settings: Settings):
-    # An impossibly high minimum makes any real ATR/price fall below the band.
-    settings.atr_entry_min_pct = 0.50
-    settings.atr_entry_max_pct = 1.0
-    eng = SignalEngine(FakeExchange(_oversold_long_df(), _btc_uptrend()), settings)
-    assert eng.generate_signal(SYMBOL) is None
-
-
-def test_atr_band_allows_in_band(settings: Settings):
-    # A fully open band lets the otherwise-valid oversold setup through.
-    settings.atr_entry_min_pct = 0.0
-    settings.atr_entry_max_pct = 1.0
-    eng = SignalEngine(FakeExchange(_oversold_long_df(), _btc_uptrend()), settings)
-    assert eng.generate_signal(SYMBOL) is not None

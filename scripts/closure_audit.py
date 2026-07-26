@@ -2,32 +2,39 @@
 """ZenGrid — Trade-Closure & Cross-Account Consistency Forensic Audit.
 
 READ-ONLY. Never opens, closes, or modifies a position or any DB row. It answers
-"why did a position that should have closed stay open, and why did one account
+"why did a basket that should have closed stay open, and why did one account
 close while another holding the same symbol did not?" using REAL data:
 
-  • position (basket / single-layer) / trade rows from the database,
+  • basket / recovery-layer / trade rows from the database,
   • the persisted ``bot_state`` locks (incl. ``tp_lock_<basket_id>``),
   • live exchange price + position per account (when credentials decrypt), and
-  • the ``trades.log`` lines (TP_LOCK_ACTIVATED / TP_LOCK_EXECUTED / SL_HIT).
+  • the ``trades.log`` lines (TP_LOCK_ACTIVATED / TP_LOCK_EXECUTED / BASKET_SL_HIT
+    / ROI_*).
 
-The exit decision for every open position is recomputed with the SAME
-``TakeProfitManager.evaluate_exit`` the bot uses (single-entry TP/SL — no
-recovery, no ROI), so the audit can never diverge from production logic.
+The exit decision for every open basket is recomputed with the SAME
+``TakeProfitManager.evaluate_exit`` the bot uses, so the audit can never diverge
+from production logic.
 
-Sections:
-  PART 1  single-account closure audit (every position: full decision row)
-  PART 2  cross-account consistency (same symbol/side groups)
+Sections (match the investigation brief):
+  PART 1  single-account closure audit (every basket: full decision row)
+  PART 2  cross-account consistency (same symbol/side/entry-window groups)
   TP-LOCK audit  ACTIVATED-without-EXECUTED + orphaned persisted locks
-  TP/SL audit    net PnL past a target but still open
+  ROI audit      ROI >= target but still open
+  TP audit       net PnL >= USD target but still open
   POSITION-SYNC  exchange qty/PnL vs internal qty/PnL
   TIMELINE       per-symbol open/close timeline across accounts
-  FAILURE REPORT positions that should have closed but did not + root cause
+  FAILURE REPORT baskets that should have closed but did not + root cause + fix
 
 Usage::
 
+    # DB-only (no live prices/positions — uses last known price if provided):
     python -m scripts.closure_audit
+
+    # With live exchange price + position-sync (decrypts per-account keys):
     python -m scripts.closure_audit --live
-    python -m scripts.closure_audit --symbol SOL/USDT:USDT
+
+    # Focus a single symbol / account:
+    python -m scripts.closure_audit --symbol TRX/USDT:USDT
     python -m scripts.closure_audit --account 12
 
 Requires the same env as the bot (DATABASE_URL, MASTER_ENCRYPTION_KEY for --live).
@@ -145,6 +152,7 @@ class LiveData:
 # ─────────────────────────────────────────────
 
 _SYM_RE = re.compile(r'symbol=(\S+)')
+_REASON_RE = re.compile(r'(?:close_reason|target_hit)=(\S+)')
 
 
 def parse_tp_lock_log(log_path: str) -> Dict[str, dict]:
@@ -179,7 +187,7 @@ def audit_open_baskets(
     db: Database, settings: Settings, live: Optional[LiveData],
     locks: Dict[str, str], symbol_filter: Optional[str], account_filter: Optional[int],
 ) -> List[dict]:
-    """Recompute the exit decision for every ACTIVE position. Returns audit rows."""
+    """Recompute the exit decision for every ACTIVE basket. Returns audit rows."""
     tp = TakeProfitManager(settings)
     rows: List[dict] = []
     with db.session() as s:
@@ -195,9 +203,10 @@ def audit_open_baskets(
             price = None
             if live:
                 price = live.price(row.account_id, row.symbol)
-            decision, gross, net, roi = 'NO_PRICE', None, None, None
-            tp_target = tp.tp_target_usd(basket)
-            sl_target = tp.sl_target_usd(basket)
+            tier = settings.get_tier_by_id(basket.volatility) or settings.account_tiers[0]
+            l1_roi, rec_roi = settings.roi_targets_for(basket.symbol, tier)
+            roi_target = rec_roi if basket.layer_count >= 2 else l1_roi
+            decision, gross, net, roi, usd_target = 'NO_PRICE', None, None, None, tp.target_usd(basket)
             if price:
                 decision, m = tp.evaluate_exit(basket, price)
                 decision = decision or 'hold'
@@ -207,8 +216,8 @@ def audit_open_baskets(
                 'symbol': row.symbol, 'side': row.side,
                 'entry': round(basket.avg_entry_price, 8), 'price': price,
                 'gross': gross, 'net': net, 'margin': round(basket.total_margin, 4),
-                'roi': roi, 'tp_target': tp_target, 'sl_target': sl_target,
-                'decision': decision,
+                'roi': roi, 'roi_target': roi_target, 'tp_target': usd_target,
+                'layers': basket.layer_count, 'decision': decision,
                 'tp_locked': locks.get(f'account_{row.account_id}_tp_lock_{row.id}', ''),
                 'created_at': basket.created_at, 'basket_id': row.id,
             })
@@ -217,16 +226,16 @@ def audit_open_baskets(
 
 def print_part1(rows: List[dict]) -> None:
     print('\n' + '=' * 70)
-    print('PART 1 — SINGLE-ACCOUNT CLOSURE AUDIT (every active position)')
+    print('PART 1 — SINGLE-ACCOUNT CLOSURE AUDIT (every active basket)')
     print('=' * 70)
     if not rows:
-        print('No active positions found.')
+        print('No active baskets found.')
         return
     hdr = ('acct', 'tier', 'symbol', 'dir', 'entry', 'price', 'gross', 'net',
-           'margin', 'roi%', 'tp$', 'sl$', 'decision', 'tp_lock')
-    print('{:>4} {:<5} {:<16} {:<5} {:>9} {:>9} {:>8} {:>8} {:>7} {:>6} {:>5} {:>5} {:<10} {:<7}'.format(*hdr))
+           'margin', 'roi%', 'roiT%', 'tp$', 'L', 'decision', 'tp_lock')
+    print('{:>4} {:<5} {:<16} {:<5} {:>9} {:>9} {:>8} {:>8} {:>7} {:>6} {:>6} {:>5} {:>2} {:<12} {:<7}'.format(*hdr))
     for r in rows:
-        print('{:>4} {:<5} {:<16} {:<5} {:>9} {:>9} {:>8} {:>8} {:>7} {:>6} {:>5} {:>5} {:<10} {:<7}'.format(
+        print('{:>4} {:<5} {:<16} {:<5} {:>9} {:>9} {:>8} {:>8} {:>7} {:>6} {:>6} {:>5} {:>2} {:<12} {:<7}'.format(
             str(r['account_id']), r['tier'], r['symbol'].split('/')[0], r['side'],
             f"{r['entry']:.6f}" if r['entry'] else '-',
             f"{r['price']:.6f}" if r['price'] else 'NONE',
@@ -234,8 +243,9 @@ def print_part1(rows: List[dict]) -> None:
             f"{r['net']:.4f}" if r['net'] is not None else '-',
             f"{r['margin']:.2f}",
             f"{r['roi'] * 100:.2f}" if r['roi'] is not None else '-',
-            f"{r['tp_target']:.2f}", f"{r['sl_target']:.2f}",
-            r['decision'], (r['tp_locked'] or '-')))
+            f"{r['roi_target'] * 100:.1f}",
+            f"{r['tp_target']:.2f}",
+            r['layers'], r['decision'], (r['tp_locked'] or '-')))
 
 
 # ─────────────────────────────────────────────
@@ -255,9 +265,10 @@ def print_part2(rows: List[dict], db: Database, symbol_filter: Optional[str]) ->
     for (sym, side), grp in sorted(multi.items()):
         print(f'\n  {sym} {side.upper()} — {len(grp)} accounts open:')
         for r in sorted(grp, key=lambda x: x['created_at'] or 0):
-            print('    acct={:<4} entry={} net={} roi={} decision={} opened={}'.format(
+            print('    acct={:<4} entry={} avgEntry={} L={} net={} roi={} decision={} opened={}'.format(
                 r['account_id'],
                 f"{r['entry']:.6f}" if r['entry'] else '-',
+                f"{r['entry']:.6f}" if r['entry'] else '-', r['layers'],
                 f"{r['net']:.4f}" if r['net'] is not None else '-',
                 f"{r['roi'] * 100:.2f}%" if r['roi'] is not None else '-',
                 r['decision'], _ts(r['created_at'])))
@@ -265,12 +276,16 @@ def print_part2(rows: List[dict], db: Database, symbol_filter: Optional[str]) ->
         if entries and (max(entries) - min(entries)) > 1e-9:
             spread = (max(entries) - min(entries)) / min(entries) * 100
             print(f'    → entry-price spread across accounts: {spread:.3f}% '
-                  f'(different fills → different net PnL at the same price)')
+                  f'(different fills → different ROI at the same price)')
+        layer_counts = {r['layers'] for r in grp}
+        if len(layer_counts) > 1:
+            print(f'    → different layer structures: {sorted(layer_counts)} '
+                  f'(L1-only vs recovery → different ROI/USD targets)')
 
 
 def print_timeline(db: Database, symbol_filter: Optional[str]) -> None:
     print('\n' + '=' * 70)
-    print('CROSS-ACCOUNT TIMELINE (opens from positions, closes from trades)')
+    print('CROSS-ACCOUNT TIMELINE (opens from baskets, closes from trades)')
     print('=' * 70)
     events: Dict[str, List[Tuple[float, str]]] = defaultdict(list)
     with db.session() as s:
@@ -279,7 +294,7 @@ def print_timeline(db: Database, symbol_filter: Optional[str]) -> None:
             bq = bq.filter(BasketModel.symbol == symbol_filter)
         for b in bq.all():
             events[b.symbol].append((b.created_at or 0,
-                                     f'acct {b.account_id} opened {b.side} (position {b.id[:8]}, {b.status})'))
+                                     f'acct {b.account_id} opened {b.side} (basket {b.id[:8]}, {b.status})'))
         tq = s.query(TradeModel)
         if symbol_filter:
             tq = tq.filter(TradeModel.symbol == symbol_filter)
@@ -287,7 +302,7 @@ def print_timeline(db: Database, symbol_filter: Optional[str]) -> None:
             events[t.symbol].append((t.exit_time or 0,
                                      f'acct {t.account_id} CLOSED {t.side} pnl={t.pnl:+.4f} reason={t.exit_reason}'))
     if not events:
-        print('No position/trade history found.')
+        print('No basket/trade history found.')
     for sym, evs in sorted(events.items()):
         print(f'\n  {sym}:')
         for ts, desc in sorted(evs, key=lambda x: x[0]):
@@ -295,7 +310,7 @@ def print_timeline(db: Database, symbol_filter: Optional[str]) -> None:
 
 
 # ─────────────────────────────────────────────
-# TP-LOCK / TP / SL / POSITION-SYNC audits
+# TP-LOCK / ROI / TP / POSITION-SYNC audits
 # ─────────────────────────────────────────────
 
 def print_tp_lock_audit(rows: List[dict], locks: Dict[str, str], log_events: Dict[str, dict]) -> None:
@@ -304,16 +319,16 @@ def print_tp_lock_audit(rows: List[dict], locks: Dict[str, str], log_events: Dic
     print('=' * 70)
     open_ids = {r['basket_id'] for r in rows}
     orphan = [(k, v) for k, v in locks.items()
-              if '_tp_lock_' in k and not k.endswith('_time') and v and v not in ('', 'false')
+              if '_tp_lock_' in k and v and v not in ('', 'false')
               and k.split('_tp_lock_')[-1] not in open_ids]
-    print('\n  Orphaned persisted TP locks (set, but position NOT open) — '
+    print('\n  Orphaned persisted TP locks (set, but basket NOT open) — '
           'TP_LOCK_ACTIVATED without TP_LOCK_EXECUTED:')
     if orphan:
         for k, v in orphan:
-            print(f'    {k} = {v}   ← position already closed/reconciled but lock never released')
+            print(f'    {k} = {v}   ← basket already closed/reconciled but lock never released')
     else:
         print('    none')
-    print('\n  Open positions currently TP-locked (mid-close, frozen):')
+    print('\n  Open baskets currently TP-locked (mid-close, frozen):')
     locked_open = [r for r in rows if r['tp_locked']]
     if locked_open:
         for r in locked_open:
@@ -330,35 +345,35 @@ def print_tp_lock_audit(rows: List[dict], locks: Dict[str, str], log_events: Dic
         print('    no TP_LOCK lines in the trades log')
 
 
-def print_tp_sl_audit(rows: List[dict]) -> None:
+def print_roi_tp_audit(rows: List[dict]) -> None:
     print('\n' + '=' * 70)
-    print('TP AUDIT — net PnL >= TP target but position still open')
+    print('ROI AUDIT — ROI >= target but basket still open')
+    print('=' * 70)
+    hits = [r for r in rows if r['roi'] is not None and r['roi'] >= r['roi_target'] > 0
+            and r['decision'] in ('hold', 'NO_PRICE')]
+    if hits:
+        for r in hits:
+            print(f'    ⚠ acct={r["account_id"]} {r["symbol"]} roi={r["roi"]*100:.2f}% '
+                  f'>= target {r["roi_target"]*100:.1f}% but decision={r["decision"]}')
+    else:
+        print('    none — every basket at/above its ROI target has a close decision')
+
+    print('\n' + '=' * 70)
+    print('TP AUDIT — net PnL >= USD target but basket still open')
     print('=' * 70)
     hits = [r for r in rows if r['net'] is not None and r['net'] >= r['tp_target'] > 0
             and r['decision'] in ('hold', 'NO_PRICE')]
     if hits:
         for r in hits:
             print(f'    ⚠ acct={r["account_id"]} {r["symbol"]} net={r["net"]:.4f} '
-                  f'>= tp_target {r["tp_target"]:.4f} but decision={r["decision"]}')
+                  f'>= target {r["tp_target"]:.2f} but decision={r["decision"]}')
     else:
-        print('    none — every position at/above its TP target has a close decision')
-
-    print('\n' + '=' * 70)
-    print('SL AUDIT — net PnL <= -SL target but position still open')
-    print('=' * 70)
-    hits = [r for r in rows if r['net'] is not None and r['sl_target'] > 0
-            and r['net'] <= -r['sl_target'] and r['decision'] in ('hold', 'NO_PRICE')]
-    if hits:
-        for r in hits:
-            print(f'    ⚠ acct={r["account_id"]} {r["symbol"]} net={r["net"]:.4f} '
-                  f'<= -sl_target {r["sl_target"]:.4f} but decision={r["decision"]}')
-    else:
-        print('    none — every position at/below its SL floor has a close decision')
+        print('    none — every basket at/above its USD target has a close decision')
 
 
 def print_position_sync(rows: List[dict], live: Optional[LiveData]) -> None:
     print('\n' + '=' * 70)
-    print('POSITION-SYNC AUDIT — exchange position vs internal position state')
+    print('POSITION-SYNC AUDIT — exchange position vs internal basket state')
     print('=' * 70)
     if not live:
         print('    skipped (run with --live for exchange comparison)')
@@ -368,6 +383,8 @@ def print_position_sync(rows: List[dict], live: Optional[LiveData]) -> None:
         pos = positions.get((r['symbol'], r['side'].lower()))
         ex_qty = float(pos['contracts']) if pos else 0.0
         ex_pnl = float(pos.get('unrealizedPnl', 0.0)) if pos else 0.0
+        # internal qty is reconstructed from layers via margin*lev/entry only if needed;
+        # here we report the basket's tracked totals from PART 1 context.
         mark = '  ⚠ MISMATCH' if (ex_qty <= 0) else ''
         print(f'    acct={r["account_id"]} {r["symbol"]} {r["side"]} '
               f'exch_qty={ex_qty:.6f} exch_pnl={ex_pnl:+.4f} internal_net={r["net"]}{mark}')
@@ -379,26 +396,28 @@ def print_position_sync(rows: List[dict], live: Optional[LiveData]) -> None:
 
 def print_failure_report(rows: List[dict], orphan_count: int) -> None:
     print('\n' + '=' * 70)
-    print('FAILURE REPORT — positions that should have closed but did not')
+    print('FAILURE REPORT — baskets that should have closed but did not')
     print('=' * 70)
     failures = [r for r in rows
-                if r['net'] is not None
-                and ((r['net'] >= r['tp_target'] > 0) or (r['sl_target'] > 0 and r['net'] <= -r['sl_target']))
+                if r['roi'] is not None
+                and ((r['roi'] >= r['roi_target'] > 0) or (r['net'] is not None and r['net'] >= r['tp_target'] > 0))
                 and r['decision'] in ('hold',)]
     if not failures:
-        print('  None: no open position is past a TP/SL target with a "hold" decision.')
-        print('  → If users still report "stayed open", the cause is NOT live exit math:')
-        print('    it is per-account entry/price/timing divergence, a deferred cycle from')
-        print('    a failed ticker fetch, or an orphaned TP lock.')
+        print('  None: no open basket is at/above a profit target with a "hold" decision.')
+        print('  → If users still report "stayed open", the cause is NOT live exit math')
+        print('    (see verdict): it is per-account entry/price/timing divergence, a')
+        print('    deferred cycle from a failed ticker fetch, or an orphaned TP lock.')
     for r in failures:
-        print(f'\n  acct={r["account_id"]} {r["symbol"]} {r["side"]} position={r["basket_id"][:8]}')
-        print(f'    expected close : net {r["net"]:.4f} vs tp {r["tp_target"]:.4f} / sl -{r["sl_target"]:.4f}')
+        print(f'\n  acct={r["account_id"]} {r["symbol"]} {r["side"]} basket={r["basket_id"][:8]}')
+        print(f'    expected close : roi>=target ({r["roi"]*100:.2f}%>={r["roi_target"]*100:.1f}%) '
+              f'or net>=tp ({r["net"]}>= {r["tp_target"]})')
         print(f'    actual state   : decision={r["decision"]} (still OPEN)')
         print(f'    root cause     : exit recomputed as hold at the SAME price the bot sees — '
               f'inspect ticker availability / TP-lock state for this cycle')
     if orphan_count:
-        print(f'\n  + {orphan_count} orphaned TP lock(s): position closed/reconciled on the '
-              f'exchange but tp_lock_<id> was never released — see reconcile_baskets.')
+        print(f'\n  + {orphan_count} orphaned TP lock(s): basket closed/reconciled on the '
+              f'exchange but tp_lock_<id> was never released and no trade row written — '
+              f'see reconcile_baskets gap in the verdict.')
 
 
 # ─────────────────────────────────────────────
@@ -417,7 +436,7 @@ def load_locks(db: Database) -> Dict[str, str]:
 def main() -> None:
     ap = argparse.ArgumentParser(description='ZenGrid trade-closure forensic audit (read-only).')
     ap.add_argument('--config', default='config/config.json')
-    ap.add_argument('--symbol', default=None, help='Filter to one symbol, e.g. SOL/USDT:USDT')
+    ap.add_argument('--symbol', default=None, help='Filter to one symbol, e.g. TRX/USDT:USDT')
     ap.add_argument('--account', type=int, default=None, help='Filter to one account id')
     ap.add_argument('--live', action='store_true', help='Fetch live price + positions per account')
     ap.add_argument('--log', default='logs/trades.log', help='Path to the trades log')
@@ -435,11 +454,11 @@ def main() -> None:
     print_part1(rows)
     print_part2(rows, db, args.symbol)
     print_tp_lock_audit(rows, locks, log_events)
-    print_tp_sl_audit(rows)
+    print_roi_tp_audit(rows)
     print_position_sync(rows, live)
     print_timeline(db, args.symbol)
     orphan_count = sum(1 for k, v in locks.items()
-                       if '_tp_lock_' in k and not k.endswith('_time') and v and v not in ('', 'false')
+                       if '_tp_lock_' in k and v and v not in ('', 'false')
                        and k.split('_tp_lock_')[-1] not in {r['basket_id'] for r in rows})
     print_failure_report(rows, orphan_count)
 

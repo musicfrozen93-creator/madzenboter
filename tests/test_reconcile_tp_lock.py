@@ -13,8 +13,9 @@ import time
 
 from config.settings import Settings
 from core.database import find_orphan_tp_locks
-from core.dto import Basket, RecoveryLayer
+from core.dto import Basket, RecoveryLayer, Signal
 from grid.position_manager import PositionManager
+from grid.recovery import RecoverySystem
 from grid.take_profit import TakeProfitManager
 from risk.position_sizer import PositionSizer
 from risk.risk_manager import RiskManager
@@ -104,7 +105,8 @@ def _pm(settings: Settings, db: FakeDB, ex: FakeExchange, balance: float = 25.0)
     rm.initialize(balance)
     return PositionManager(
         exchange_client=ex, settings=settings, database=db, risk_manager=rm,
-        position_sizer=PositionSizer(settings), tp_manager=TakeProfitManager(settings),
+        position_sizer=PositionSizer(settings), recovery_system=RecoverySystem(settings),
+        tp_manager=TakeProfitManager(settings),
     )
 
 
@@ -163,12 +165,12 @@ def test_reconcile_releases_tp_lock_and_uses_locked_reason(settings: Settings):
     basket = _old_basket()
     db.baskets.append(basket)
     # A TP lock was committed before the position vanished.
-    db.set_state(_tp_lock_key(basket), 'tp')
+    db.set_state(_tp_lock_key(basket), 'roi_l1')
     db.set_state(f'{_tp_lock_key(basket)}_time', str(time.time()))
 
     pm.reconcile_baskets([basket])
     # The committed reason is preserved on the trade, and the lock is released.
-    assert db.trades[-1].exit_reason == 'tp'
+    assert db.trades[-1].exit_reason == 'roi_l1'
     assert not db.get_state(_tp_lock_key(basket))           # orphan lock cleared
 
 
@@ -228,8 +230,8 @@ def test_fetch_price_with_retry_returns_none_after_exhaustion(settings: Settings
 
 def test_manage_retries_ticker_instead_of_skipping(settings: Settings):
     # The snapshot fetch fails once; manage_baskets must RETRY (not skip) and then
-    # close the position that is over its take-profit target.
-    db, ex = FakeDB(), FakeExchange(price=PRICE + 0.005)
+    # close the basket that is over its ROI target.
+    db, ex = FakeDB(), FakeExchange(price=PRICE + 0.003)
     pm = _pm(settings, db, ex)
     basket = Basket(symbol=SYMBOL, side='long', atr_at_entry=0.001, volatility='tier1',
                     leverage=8, account_id=1)
@@ -238,4 +240,4 @@ def test_manage_retries_ticker_instead_of_skipping(settings: Settings):
     ex.ticker_fail = 1                                      # snapshot fetch fails once
     pm.manage_baskets([basket], balance=25.0)
     assert basket.status == 'closed'
-    assert db.trades and db.trades[-1].exit_reason == 'tp'
+    assert db.trades and db.trades[-1].exit_reason == 'roi_l1'

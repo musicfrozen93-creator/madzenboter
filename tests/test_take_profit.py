@@ -1,9 +1,9 @@
-"""Tests for the single-entry fixed-% take-profit / stop-loss.
+"""Tests for the fixed-dollar, tier-specific basket take-profit.
 
-Each position is a single entry (no recovery, no layers). It closes on the FIRST
-of: net PnL ≥ tp_margin_pct × margin ('tp') or net PnL ≤ −sl_margin_pct × margin
-('sl'). Sizing uses a realistic low-priced coin (entry $0.10, margin × leverage /
-price) at the approved 10× leverage.
+Uses realistic low-priced-coin sizing (entry ≈ $0.10, fixed margin × leverage /
+price) so the estimated round-trip fee is tiny relative to the dollar target —
+exactly as it is for TRX/XRP/XLM at 5×. The basket's tier is stored in the
+``volatility`` field (where the position manager locks it at open).
 """
 
 from config.settings import Settings
@@ -11,98 +11,127 @@ from core.dto import Basket, RecoveryLayer
 from grid.take_profit import TakeProfitManager
 
 ENTRY = 0.10
-LEVERAGE = 10
+LEVERAGE = 5
 
 
 def _qty(margin: float) -> float:
     return (margin * LEVERAGE) / ENTRY
 
 
-def _pos(margin: float, side='long', tier='tier1') -> Basket:
-    """A single-entry position with the given margin (one layer)."""
-    b = Basket(symbol='SOL/USDT:USDT', side=side, atr_at_entry=0.001, volatility=tier)
-    b.add_layer(RecoveryLayer(1, entry_price=ENTRY, margin=margin,
-                              quantity=_qty(margin), side=side))
+def _basket(margins, side='long', tier='tier1') -> Basket:
+    b = Basket(symbol='XRP/USDT:USDT', side=side, atr_at_entry=0.001, volatility=tier)
+    for i, margin in enumerate(margins, start=1):
+        b.add_layer(RecoveryLayer(i, entry_price=ENTRY, margin=margin, quantity=_qty(margin), side=side))
     return b
 
 
-def test_tp_sl_targets_scale_with_margin(settings: Settings):
+def test_target_uses_basket_tier_and_layer_count(settings: Settings):
     tp = TakeProfitManager(settings)
-    # Tier 1: margin $0.8 → TP 20% = $0.16, SL 12% = $0.096.
-    b1 = _pos(0.8, tier='tier1')
-    assert abs(tp.tp_target_usd(b1) - 0.16) < 1e-9
-    assert abs(tp.sl_target_usd(b1) - 0.096) < 1e-9
-    # Tier 2: margin $1.5 → TP $0.30, SL $0.18.
-    b2 = _pos(1.5, tier='tier2')
-    assert abs(tp.tp_target_usd(b2) - 0.30) < 1e-9
-    assert abs(tp.sl_target_usd(b2) - 0.18) < 1e-9
+    # Tier 1: $0.30 (L1) / $0.80 (L1+L2)
+    assert tp.target_usd(_basket([2.0], tier='tier1')) == 0.30
+    assert tp.target_usd(_basket([2.0, 4.0], tier='tier1')) == 0.80
+    # Tier 2: $0.50 (L1) / $1.20 (L1+L2)
+    assert tp.target_usd(_basket([4.0], tier='tier2')) == 0.50
+    assert tp.target_usd(_basket([4.0, 8.0], tier='tier2')) == 1.20
 
 
-def test_take_profit_fires_on_net_target(settings: Settings):
+def test_tier1_layer1_closes_at_half_dollar(settings: Settings):
     tp = TakeProfitManager(settings)
-    b = _pos(0.8)                                    # margin 0.8, qty 80
-    # Small move → net ≈ $0.07 < $0.20 → hold.
-    assert tp.evaluate_exit(b, ENTRY + 0.0010)[0] is None
-    assert not tp.check_take_profit(b, ENTRY + 0.0010)
-    # +0.0035 → net ≈ $0.27 ≥ $0.20 → take profit.
-    reason, m = tp.evaluate_exit(b, ENTRY + 0.0035)
-    assert reason == 'tp'
-    assert m['net_pnl'] >= m['tp_target'] > 0
-    assert tp.check_take_profit(b, ENTRY + 0.0035)
+    b = _basket([2.0], side='long', tier='tier1')  # qty = 100 @ 0.10
+    assert not tp.check_basket_tp(b, ENTRY)             # 0 profit
+    # +0.006 move on 100 qty = +$0.60 gross, fees tiny → net ≥ $0.50.
+    assert tp.check_basket_tp(b, ENTRY + 0.006)
 
 
-def test_stop_loss_fires_on_net_floor(settings: Settings):
+def test_tier2_recovery_requires_two_dollars(settings: Settings):
     tp = TakeProfitManager(settings)
-    b = _pos(0.8)
-    # Small adverse move → net ≈ −$0.05 above the −$0.096 floor → hold.
-    assert tp.evaluate_exit(b, ENTRY - 0.0005)[0] is None
-    assert not tp.check_stop_loss(b, ENTRY - 0.0005)
-    # −0.0015 → net ≈ −$0.13 ≤ −$0.096 → stop loss.
-    reason, m = tp.evaluate_exit(b, ENTRY - 0.0015)
-    assert reason == 'sl'
-    assert m['net_pnl'] <= -m['sl_target']
-    assert tp.check_stop_loss(b, ENTRY - 0.0015)
+    b = _basket([4.0, 8.0], side='long', tier='tier2')  # qty = 200 + 400 = 600
+    # +0.002 move = +$1.20 gross (< $2.00 target) → no close.
+    assert not tp.check_basket_tp(b, ENTRY + 0.002)
+    # +0.005 move = +$3.00 gross → net above $2.00 → close.
+    assert tp.check_basket_tp(b, ENTRY + 0.005)
 
 
-def test_short_side(settings: Settings):
+def test_unknown_tier_falls_back_to_tier1(settings: Settings):
     tp = TakeProfitManager(settings)
-    b = _pos(0.8, side='short')
-    assert tp.evaluate_exit(b, ENTRY - 0.0035)[0] == 'tp'   # price down → short profit
-    assert tp.evaluate_exit(b, ENTRY + 0.0015)[0] == 'sl'   # price up → short loss
+    # A basket whose volatility isn't a known tier id uses Tier 1 targets.
+    assert tp.target_usd(_basket([2.0], tier='legacy')) == 0.30
 
 
-def test_tier2_targets(settings: Settings):
+def test_short_side_profit(settings: Settings):
     tp = TakeProfitManager(settings)
-    b = _pos(1.5, tier='tier2')                     # margin 1.5, qty 150
-    assert tp.evaluate_exit(b, ENTRY + 0.0010)[0] is None   # net < $0.375
-    assert tp.evaluate_exit(b, ENTRY + 0.0040)[0] == 'tp'   # net ≥ $0.375
+    b = _basket([2.0], side='short', tier='tier1')
+    assert not tp.check_basket_tp(b, ENTRY)
+    assert tp.check_basket_tp(b, ENTRY - 0.006)         # price down → short profit
 
 
-def test_unknown_tier_still_uses_global_pcts(settings: Settings):
-    # TP/SL are global percentages of margin — no tier lookup needed.
+# ── Recovery basket ROI exit ──
+
+def test_tier1_recovery_roi_normalized_to_10pct(settings: Settings):
+    # NORMALIZATION: Tier 1 recovery ROI is now 10% (was 12%) → ~$0.60 net on $6.
     tp = TakeProfitManager(settings)
-    b = _pos(0.8, tier='legacy')
-    assert abs(tp.tp_target_usd(b) - 0.16) < 1e-9
-    assert abs(tp.sl_target_usd(b) - 0.096) < 1e-9
+    assert settings.get_tier(25.0)['recovery_roi_target'] == 0.10
+    b = _basket([2.0, 4.0], side='long', tier='tier1')  # total margin 6, qty 300
+    # ~7% ROI → still open.
+    assert tp.evaluate_exit(b, ENTRY + 0.0015)[0] is None
+    # ~10.6% ROI → closes NOW (would NOT have at the old 12% target).
+    reason, m = tp.evaluate_exit(b, ENTRY + 0.0022)
+    assert reason == 'roi_recovery'
+    assert 0.10 <= m['roi'] < 0.12                       # in the newly-enabled band
+    assert m['net_pnl'] < m['usd_target']               # ROI fired first, not USD
+
+
+def test_tier2_recovery_closes_on_roi_target(settings: Settings):
+    # Tier 2 recovery: total margin $12, ROI 10% → ~$1.20 net (below $2.00 USD).
+    tp = TakeProfitManager(settings)
+    b = _basket([4.0, 8.0], side='long', tier='tier2')  # total margin 12
+    assert tp.evaluate_exit(b, ENTRY + 0.001)[0] is None
+    reason, m = tp.evaluate_exit(b, ENTRY + 0.0025)
+    assert reason == 'roi_recovery'
+    assert m['roi'] >= 0.10
+
+
+def test_layer1_basket_closes_on_roi(settings: Settings):
+    # A Layer-1-only basket now ALSO uses an ROI exit (Tier 1 12% of $2 = $0.24),
+    # which fires before the $0.50 USD target.
+    tp = TakeProfitManager(settings)
+    b = _basket([2.0], side='long', tier='tier1')        # margin 2; 12% ROI = $0.24
+    # Not enough yet (ROI < 12%).
+    assert tp.evaluate_exit(b, ENTRY + 0.001)[0] is None
+    # Net crosses ~12% ROI (~$0.24) but stays below the $0.50 USD target.
+    reason, m = tp.evaluate_exit(b, ENTRY + 0.003)
+    assert reason == 'roi_l1'
+    assert m['net_pnl'] < m['usd_target']                # ROI fired first, not USD
+    assert m['roi'] >= 0.12
+
+
+def test_tier2_layer1_roi(settings: Settings):
+    # Tier 2 L1: margin $4, ROI 10% → $0.40 (below the $0.80 USD target).
+    tp = TakeProfitManager(settings)
+    b = _basket([4.0], side='long', tier='tier2')
+    assert tp.evaluate_exit(b, ENTRY + 0.001)[0] is None
+    reason, m = tp.evaluate_exit(b, ENTRY + 0.0025)
+    assert reason == 'roi_l1'
+    assert m['roi'] >= 0.10
+
+
+def test_recovery_roi_exit_short_side(settings: Settings):
+    tp = TakeProfitManager(settings)
+    b = _basket([2.0, 4.0], side='short', tier='tier1')
+    assert tp.evaluate_exit(b, ENTRY)[0] is None
+    assert tp.evaluate_exit(b, ENTRY - 0.003)[0] == 'roi_recovery'
 
 
 def test_evaluate_exit_metrics_are_consistent(settings: Settings):
+    # The metrics used by TP_DEBUG / ROI_DEBUG must be internally consistent:
+    # net = gross − fee, roi = net / margin, decision matches the reason.
     tp = TakeProfitManager(settings)
-    b = _pos(0.8)
-    reason, m = tp.evaluate_exit(b, ENTRY + 0.0035)
+    b = _basket([2.0], side='long', tier='tier1')        # margin 2, qty 100
+    reason, m = tp.evaluate_exit(b, ENTRY + 0.003)
     assert abs(m['net_pnl'] - (m['gross_pnl'] - m['fee'])) < 1e-9
     assert abs(m['roi'] - m['net_pnl'] / m['total_margin']) < 1e-9
-    assert m['decision'] == reason == 'tp'
-    assert m['fee'] > 0                              # round-trip fee deducted
-    assert m['tp_target'] > 0 and m['sl_target'] > 0
-    # A flat (zero-profit) position holds with a clean 'hold' decision.
+    assert m['decision'] == reason == 'roi_l1'
+    assert m['fee'] > 0                                   # round-trip fee deducted
+    # A flat (zero-profit) basket holds with a clean 'hold' decision.
     _, m0 = tp.evaluate_exit(b, ENTRY)
     assert m0['decision'] == 'hold'
-
-
-def test_empty_position_holds(settings: Settings):
-    tp = TakeProfitManager(settings)
-    b = Basket(symbol='SOL/USDT:USDT', side='long', atr_at_entry=0.001, volatility='tier1')
-    reason, m = tp.evaluate_exit(b, ENTRY)
-    assert reason is None
-    assert m['decision'] == 'hold'

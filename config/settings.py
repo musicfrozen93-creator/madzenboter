@@ -1,22 +1,18 @@
 """
 ZenGrid — Central Settings, Constants, and Enums.
 
-Single-entry scalping core for Binance USDT-M Futures.
+Dark-Venus-inspired basket recovery core for Binance USDT-M Futures.
 
 This module is the SINGLE source of truth for all strategy parameters. The
 strategy is deliberately minimal and identical for every account:
 
   • Mean-reversion entries (RSI + Bollinger touch) on the 15m timeframe
   • A global BTC 15m trend filter gates trade direction
-  • An ATR feasibility band keeps the fixed % stop out of noise and the fixed
-    % target reachable in time
-  • SINGLE ENTRY — exactly one position per symbol. NO recovery, NO Layer 2,
-    NO averaging down, NO martingale, NO grid expansion.
-  • Fixed take-profit and stop-loss expressed as a percentage of the position
-    margin (TP 20% / SL 12%)
-  • Per-account portfolio trailing profit lock (flatten on aggregate give-back)
-  • FIXED position sizing — account balance never changes margin or position
-    count (balance only selects the tier)
+  • Controlled 2-layer recovery basket (Layer 1 + ONE recovery layer) with
+    ATR-based spacing — never a martingale, never Layer 3+
+  • Basket take-profit closes the whole basket at a fixed USDT profit target
+  • FIXED position sizing — account balance never changes margin, position
+    count, recovery size, or layer count
   • Per-account daily profit target and daily loss limit (per-tier)
 
 Multi-account platform fields (DATABASE_URL, MASTER_ENCRYPTION_KEY, admin API)
@@ -33,50 +29,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
-
-
-# ─────────────────────────────────────────────
-# Fixed trading universe — exactly 100 USDT-M perpetual symbols.
-# High liquidity, tight spreads, medium volatility. BTC and ETH are EXCLUDED
-# from execution (BTC is the regime filter only; ETH's min-notional is too high
-# for the tier margins). The bot scans ONLY these symbols and ignores every
-# other Binance market. The startup universe validator drops any symbol the
-# exchange reports as delisted/inactive — it never adds replacements.
-# ─────────────────────────────────────────────
-
-SUPPORTED_UNIVERSE: list = [
-    # Core 20 — deepest liquidity, tightest spreads
-    'SOL/USDT:USDT', 'XRP/USDT:USDT', 'BNB/USDT:USDT', 'DOGE/USDT:USDT',
-    'ADA/USDT:USDT', 'AVAX/USDT:USDT', 'LINK/USDT:USDT', 'DOT/USDT:USDT',
-    'TRX/USDT:USDT', 'LTC/USDT:USDT', 'BCH/USDT:USDT', 'NEAR/USDT:USDT',
-    'SUI/USDT:USDT', 'TON/USDT:USDT', 'APT/USDT:USDT', 'ATOM/USDT:USDT',
-    'UNI/USDT:USDT', 'FIL/USDT:USDT', 'ETC/USDT:USDT', 'XLM/USDT:USDT',
-    # 21–50 — strong liquidity, medium volatility
-    'ARB/USDT:USDT', 'OP/USDT:USDT', 'INJ/USDT:USDT', 'SEI/USDT:USDT',
-    'TIA/USDT:USDT', 'AAVE/USDT:USDT', 'RUNE/USDT:USDT', 'FET/USDT:USDT',
-    'RENDER/USDT:USDT', 'IMX/USDT:USDT', 'STX/USDT:USDT', 'LDO/USDT:USDT',
-    'CRV/USDT:USDT', 'DYDX/USDT:USDT', 'GRT/USDT:USDT', 'ALGO/USDT:USDT',
-    'ICP/USDT:USDT', 'HBAR/USDT:USDT', 'VET/USDT:USDT', 'POL/USDT:USDT',
-    'SAND/USDT:USDT', 'MANA/USDT:USDT', 'AXS/USDT:USDT', 'GALA/USDT:USDT',
-    'EGLD/USDT:USDT', 'THETA/USDT:USDT', 'FLOW/USDT:USDT', 'CHZ/USDT:USDT',
-    'ENS/USDT:USDT', 'KSM/USDT:USDT',
-    # 51–80 — established mid-caps
-    'ENA/USDT:USDT', 'ONDO/USDT:USDT', 'JUP/USDT:USDT', 'PYTH/USDT:USDT',
-    'JTO/USDT:USDT', 'WLD/USDT:USDT', 'BLUR/USDT:USDT', 'MASK/USDT:USDT',
-    'COMP/USDT:USDT', 'SNX/USDT:USDT', 'SUSHI/USDT:USDT', '1INCH/USDT:USDT',
-    'AR/USDT:USDT', 'ROSE/USDT:USDT', 'CELO/USDT:USDT', 'ANKR/USDT:USDT',
-    'IOTA/USDT:USDT', 'QTUM/USDT:USDT', 'WAVES/USDT:USDT', 'NEO/USDT:USDT',
-    'DASH/USDT:USDT', 'ZEC/USDT:USDT', 'BAT/USDT:USDT', 'ZRX/USDT:USDT',
-    'YFI/USDT:USDT', 'BAL/USDT:USDT', 'GMT/USDT:USDT', 'APE/USDT:USDT',
-    'CFX/USDT:USDT', 'ARKM/USDT:USDT',
-    # 81–100 — liquid tail + capped high-volatility memecoins
-    'JASMY/USDT:USDT', 'SKL/USDT:USDT', 'LRC/USDT:USDT', 'STORJ/USDT:USDT',
-    'RSR/USDT:USDT', 'S/USDT:USDT', 'ORDI/USDT:USDT', '1000PEPE/USDT:USDT',
-    'WIF/USDT:USDT', '1000BONK/USDT:USDT', '1000FLOKI/USDT:USDT',
-    '1000SHIB/USDT:USDT', '1000SATS/USDT:USDT', 'MEME/USDT:USDT',
-    'TURBO/USDT:USDT', 'PEOPLE/USDT:USDT', 'NEIRO/USDT:USDT', 'MEW/USDT:USDT',
-    'FXS/USDT:USDT', 'GMX/USDT:USDT',
-]
 
 
 # ─────────────────────────────────────────────
@@ -126,10 +78,35 @@ class Settings:
     admin_api_key: str = ''
     admin_api_port: int = 8000
 
-    # ── Supported symbols / fixed universe (ONLY these 100 are ever traded) ──
-    supported_symbols: list = field(default_factory=lambda: list(SUPPORTED_UNIVERSE))
-    # BTC is the trend-filter reference only — it is never traded (its margin
-    # would be far below Binance's BTC min notional).
+    # ── Supported symbols / watchlist (correlated assets — ONLY these traded) ──
+    # Expanded to 10 liquid, low/mid-priced USDT-M perps for more opportunities.
+    # Risk is unchanged: tier sizing, exposure caps, layer count, and per-account
+    # position limits still bound everything — more symbols only means more
+    # candidate setups, never more margin/exposure/layers.
+    supported_symbols: list = field(
+        default_factory=lambda: [
+            'TRX/USDT:USDT',
+            'XRP/USDT:USDT',
+            'XLM/USDT:USDT',
+            'ADA/USDT:USDT',
+            'ALGO/USDT:USDT',
+            'HBAR/USDT:USDT',
+            'VET/USDT:USDT',
+            'LINK/USDT:USDT',
+            'DOT/USDT:USDT',
+            'ATOM/USDT:USDT',
+            'LTC/USDT:USDT',
+            'POL/USDT:USDT',
+            'ETC/USDT:USDT',
+            'BCH/USDT:USDT',
+            'NEAR/USDT:USDT',
+            'EOS/USDT:USDT',
+            'FIL/USDT:USDT',
+            'IOTA/USDT:USDT',
+            'GRT/USDT:USDT',
+            'AVAX/USDT:USDT',
+        ]
+    )
     btc_symbol: str = 'BTC/USDT:USDT'
 
     # ── Timeframe (15-minute candles only) ──
@@ -158,85 +135,98 @@ class Settings:
     # BTC candles for every symbol evaluated within a loop.
     btc_regime_cache_seconds: int = 300
 
-    # ── Leverage (default 10x; admin may override 8x–10x; NEVER exceed 10x) ──
+    # ── Leverage (default 8x; admin may override 5x–10x; NEVER exceed 10x) ──
     # Fixed leverage — never dynamically adjusted, never balance-scaled.
-    default_leverage: int = 10
-    min_leverage: int = 8
+    default_leverage: int = 8
+    min_leverage: int = 5
     max_leverage: int = 10
     hard_max_leverage: int = 10
     # Resolved leverage actually used by an account (set per-account by
     # create_account_settings; defaults to default_leverage for the master).
-    leverage: int = 10
+    leverage: int = 8
 
     # ── Account tiers (FIXED sizing — balance ONLY selects the tier) ──
     # Exactly two tiers. Balance is evaluated solely to pick a tier; once a
-    # position is opened its tier is LOCKED (margin and limits come from the
-    # position's tier — never resized by later balance changes such as
-    # deposits/withdrawals). There is no balance scaling, no percentage sizing,
-    # no dynamic/adaptive/volatility sizing, no martingale.
+    # basket is opened its tier is LOCKED (recovery margin, exposure cap, and TP
+    # target all come from the basket's tier — never resized by later balance
+    # changes such as deposits/withdrawals). There is no balance scaling, no
+    # percentage sizing, no dynamic/adaptive/volatility sizing, no martingale.
     #
-    #   Tier 1 ($20–$39.99)  margin $0.8  8 positions   daily +$2/−$3   death <$15
-    #                        portfolio lock: arm ≥$0.50, trail to max($0.35, peak×band%)
-    #   Tier 2 ($40+)        margin $1.5  10 positions   daily +$3.5/−$4 death <$30
-    #                        portfolio lock: arm ≥$0.80, trail to max($0.50, peak×band%)
-    # SINGLE ENTRY: one position per symbol, so max_positions == max_active_symbols.
+    #   Tier 1 ($20–$39.99) L1 $1 L2 $2 cap $3  daily +$2/−$3  4 sym/8 pos  death <$15
+    #   Tier 2 ($40+)       L1 $2 L2 $4 cap $6  daily +$3.5/−$4 6 sym/12 pos death <$30
+    # Rebalance: per-basket size halved and symbol/position caps doubled, so the
+    # MAX total deployed margin is unchanged (Tier 1: 4×$3=$12; Tier 2: 6×$6=$36)
+    # while diversification, trade frequency, and basket turnover rise.
     min_tier_balance: float = 20.0
     account_tiers: list = field(
         default_factory=lambda: [
             {
                 'id': 'tier1', 'max_balance': 40.0,
-                'margin_per_trade': 0.8,
+                'layer1_margin': 1.0, 'layer2_margin': 2.0,
+                'max_basket_exposure': 3.0,
+                'basket_tp_l1': 0.30, 'basket_tp_l2': 0.80,
+                # Recovery ROI normalized to 10% (was 12%) for faster recovery
+                # exits; reward stays proportional to the $3 total margin.
+                'layer1_roi_target': 0.12, 'recovery_roi_target': 0.10,
                 'daily_profit_target': 2.0, 'daily_loss_limit': 3.0,
-                'max_active_symbols': 8, 'max_positions': 8,
+                'max_active_symbols': 4, 'max_positions': 8,
                 'protection_floor': 15.0,
-                # Portfolio trailing profit lock: arm at $0.50, then protect
-                # max(floor $0.35, peak × band%). Bands are [peak_threshold, pct].
-                'portfolio_lock_trigger': 0.50, 'portfolio_lock_floor': 0.35,
-                'portfolio_protection_bands': [
-                    [0.50, 0.70], [1.00, 0.75], [1.50, 0.80], [2.00, 0.85],
-                ],
             },
             {
                 'id': 'tier2', 'max_balance': float('inf'),
-                'margin_per_trade': 1.5,
+                'layer1_margin': 2.0, 'layer2_margin': 4.0,
+                'max_basket_exposure': 6.0,
+                'basket_tp_l1': 0.50, 'basket_tp_l2': 1.20,
+                'layer1_roi_target': 0.10, 'recovery_roi_target': 0.10,
                 'daily_profit_target': 3.5, 'daily_loss_limit': 4.0,
-                'max_active_symbols': 10, 'max_positions': 10,
+                'max_active_symbols': 6, 'max_positions': 12,
                 'protection_floor': 30.0,
-                'portfolio_lock_trigger': 0.80, 'portfolio_lock_floor': 0.50,
-                'portfolio_protection_bands': [
-                    [0.80, 0.70], [2.00, 0.75], [3.00, 0.80], [4.00, 0.85],
-                ],
             },
         ]
     )
     # Absolute notional floor — Binance rejects dust orders below ~$5 notional.
     min_notional_floor: float = 5.0
 
-    # ── Take-profit / stop-loss (fixed % of the position margin) ──
-    # Both are evaluated on NET PnL (gross − round-trip fees). A position closes
-    # on the FIRST of: net ≥ tp_margin_pct × margin (reason 'tp') or
-    # net ≤ −sl_margin_pct × margin (reason 'sl').
-    #   TP 20% → Tier 1 $0.16 / Tier 2 $0.30
-    #   SL 12% → Tier 1 $0.096 / Tier 2 $0.18
-    tp_margin_pct: float = 0.20
-    sl_margin_pct: float = 0.12
+    # ── Basket hard stop-loss (per-basket backstop, independent of daily limit) ──
+    # A SINGLE basket must never consume a large slice of the daily loss
+    # allowance. If a basket's NET PnL (gross − estimated round-trip fees) falls
+    # to −basket_hard_sl_usd, the whole basket is closed immediately with reason
+    # 'basket_sl'. This sits BELOW the account-level daily-loss/death-protection
+    # guards (which still fire first when breached) and never weakens them — it
+    # only adds an earlier, per-basket cut. Applies to Layer-1 AND recovery
+    # baskets, every supported symbol.
+    basket_hard_sl_usd: float = 0.30
 
-    # ── ATR feasibility band (entry gate) ──
-    # Skip an entry unless ATR(14)/price is inside this band, so the fixed % stop
-    # is never inside pure noise (ATR too high) and the fixed % target stays
-    # reachable in reasonable time (ATR too low). This is the "medium volatility"
-    # market-selection criterion applied per-trade.
-    atr_entry_min_pct: float = 0.003
-    atr_entry_max_pct: float = 0.012
+    # ── Per-symbol ROI overrides (exit ROI target lookup) ──
+    # The default ROI targets live on the tier (layer1_roi_target /
+    # recovery_roi_target). A symbol listed here overrides those targets so a
+    # capital-sticky symbol can be closed sooner. TRX historically stays open for
+    # extended periods (capital locked, fees accruing), so it uses a tighter 8%
+    # Layer-1 AND recovery ROI. Every other symbol keeps its tier values.
+    symbol_roi_overrides: dict = field(
+        default_factory=lambda: {
+            'TRX/USDT:USDT': {'layer1_roi_target': 0.08, 'recovery_roi_target': 0.08},
+        }
+    )
 
-    # ── Signal quality gate ──
-    # A new position requires a minimum signal-strength score (0–4): +1 extreme
-    # RSI, +1 strong Bollinger penetration, +1 BTC trend aligned, +1 good spread
-    # & liquidity.
-    min_signal_score: int = 1
+    # ── Recovery model (max 2 layers — NO Layer 3/4/5, never a martingale) ──
+    recovery_max_layers: int = 2
+    # Layer 2 activates on a HYBRID trigger — whichever occurs FIRST of:
+    #   A) price moves ATR(14) × layer2_atr_multiplier against Layer 1, OR
+    #   B) Layer 1 floating loss ≥ recovery_loss_trigger_usd (USDT).
+    # Volatility-adjusted spacing — NOT fixed grid spacing.
+    layer2_atr_multiplier: float = 2.0
+    recovery_loss_trigger_usd: float = 0.30
 
-    # ── Position limits ──
-    max_basket_per_symbol: int = 1          # never two positions on one symbol
+    # ── Position limits (max active symbols / total positions are PER-TIER) ──
+    max_basket_per_symbol: int = 1          # never two baskets on one symbol
+
+    # ── Correlation protection (TRX/XRP/XLM treated as correlated assets) ──
+    # A new basket needs a minimum signal-strength score (0–4) that rises with
+    # the number of already-open correlated baskets:
+    #   0 active → score >= 2,   1+ active → score >= 3.
+    correlation_min_score_first: int = 2
+    correlation_min_score_additional: int = 3
 
     # ── Pre-trade risk-rule skip filters (skip the trade if ANY trips) ──
     risk_filter_lookback: int = 30          # bars for ATR/volume averages
@@ -245,14 +235,18 @@ class Settings:
     news_candle_atr_multiplier: float = 2.5 # candle body > 2.5× ATR (news candle)
     volume_spike_multiplier: float = 3.0    # last volume > 3× average volume
 
-    # ── Same-symbol cooldown after a position closes (per-account, persisted) ──
-    # After a position closes on a symbol, NO new position on the SAME symbol for
-    # this window; other symbols are unaffected (symbol-specific).
-    symbol_cooldown_seconds: int = 1800     # 30 min
+    # ── Same-symbol cooldown after a basket closes (per-account, persisted) ──
+    symbol_cooldown_seconds: int = 900      # 15 min (one 15m candle)
 
-    # ── Fees (used for net-profit estimation on TP/SL) ──
-    # Realistic Binance USDT-M taker fee (0.05%). Round-trip = 2× = 0.10% notional.
-    taker_fee_pct: float = 0.0005
+    # ── Fees (used for net-profit estimation on basket TP) ──
+    taker_fee_pct: float = 0.0004
+
+    # ── V4 strategy feature flag ──
+    # When False (default) the bot runs the existing V1 mean-reversion basket
+    # engine exactly as before. When True the parallel V4 stack (v4/ package) is
+    # activated. Kept default-off so the V4 implementation stays fully isolated
+    # until it has been paper-validated (spec deployment gate).
+    v4_enabled: bool = False
 
     # ── Logging ──
     log_level: str = 'INFO'
@@ -307,9 +301,10 @@ class Settings:
         settings.leverage = settings.clamp_leverage(settings.default_leverage)
 
         logger.info(
-            'Settings loaded from %s (testnet=%s, symbols=%d, leverage=%dx)',
+            'Settings loaded from %s (testnet=%s, symbols=%s, leverage=%dx)',
             config_path, settings.use_testnet,
-            len(settings.supported_symbols), settings.leverage,
+            ','.join(s.split('/')[0] for s in settings.supported_symbols),
+            settings.leverage,
         )
         return settings
 
@@ -321,7 +316,7 @@ class Settings:
 
         Every account uses the SAME strategy configuration. The ONLY per-account
         override honoured is the admin leverage override, clamped to the allowed
-        admin range (8×–10×) and the hard ceiling (10×). Risk %, max positions,
+        admin range (3×–8×) and the hard ceiling (10×). Risk %, max positions,
         and TP/SL JSON overrides are intentionally IGNORED — sizing, limits, and
         targets are globally fixed so that no account can be scaled differently.
 
@@ -336,7 +331,7 @@ class Settings:
 
         lev_override = overrides.get('leverage_override')
         if lev_override is not None:
-            # Admin override: allowed 8×–10×, never above the hard ceiling (10×).
+            # Admin override: allowed 3×–8×, never above the hard ceiling (10×).
             resolved = max(
                 base_settings.min_leverage,
                 min(int(lev_override), base_settings.max_leverage),
@@ -362,7 +357,7 @@ class Settings:
         return max(1, min(value, self.hard_max_leverage))
 
     def is_supported_symbol(self, symbol: str) -> bool:
-        """True if the symbol is one of the fixed supported pairs."""
+        """True if the symbol is one of the three supported pairs."""
         return symbol in self.supported_symbols
 
     # ── Account tier helpers (balance ONLY selects the tier) ──
@@ -384,17 +379,33 @@ class Settings:
     def get_tier_or_default(self, balance: float) -> dict:
         """Tier for a balance, falling back to the most conservative (Tier 1).
 
-        Used for managing EXISTING positions / daily limits when the balance has
+        Used for managing EXISTING baskets / daily limits when the balance has
         dipped below the minimum tier — the tightest limits stay in force.
         """
         return self.get_tier(balance) or self.account_tiers[0]
 
     def get_tier_by_id(self, tier_id: Optional[str]) -> Optional[dict]:
-        """Look up a tier by its stored id (used to read a position's locked tier)."""
+        """Look up a tier by its stored id (used to read a basket's locked tier)."""
         for tier in self.account_tiers:
             if tier['id'] == tier_id:
                 return tier
         return None
+
+    def roi_targets_for(self, symbol: str, tier: dict) -> tuple:
+        """Resolve (layer1_roi_target, recovery_roi_target) for a symbol.
+
+        Starts from the basket's LOCKED tier values, then applies any
+        per-symbol override from ``symbol_roi_overrides`` (e.g. TRX → 8%/8%).
+        A symbol with no override keeps the tier defaults unchanged. Returns the
+        targets as fractions (0–1).
+        """
+        l1 = float(tier.get('layer1_roi_target', 0.0))
+        rec = float(tier.get('recovery_roi_target', 0.0))
+        override = (self.symbol_roi_overrides or {}).get(symbol)
+        if override:
+            l1 = float(override.get('layer1_roi_target', l1))
+            rec = float(override.get('recovery_roi_target', rec))
+        return l1, rec
 
     def validate(self) -> list[str]:
         """Validate settings and return a list of issues found (empty if OK)."""
@@ -402,88 +413,62 @@ class Settings:
 
         if not self.supported_symbols:
             issues.append('supported_symbols must not be empty')
-        if len(self.supported_symbols) != 100:
-            issues.append(
-                f'supported_symbols must define exactly 100 symbols '
-                f'(found {len(self.supported_symbols)})'
-            )
-        if self.btc_symbol in self.supported_symbols:
-            issues.append('btc_symbol must be the filter reference only, not a traded symbol')
         if len(self.account_tiers) != 2:
             issues.append('account_tiers must define exactly two tiers')
+        if self.recovery_max_layers != 2:
+            issues.append('recovery_max_layers must be exactly 2 (Layer 1 + one recovery)')
+        if self.layer2_atr_multiplier <= 0:
+            issues.append('layer2_atr_multiplier must be > 0')
         if self.default_leverage < self.min_leverage or self.default_leverage > self.max_leverage:
             issues.append('default_leverage must be within [min_leverage, max_leverage]')
         if self.max_leverage > self.hard_max_leverage:
             issues.append('max_leverage must not exceed hard_max_leverage (10)')
-
-        # Take-profit / stop-loss percentages.
-        if not (0 < self.sl_margin_pct < 1):
-            issues.append('sl_margin_pct must be between 0 and 1')
-        if not (0 < self.tp_margin_pct < 1):
-            issues.append('tp_margin_pct must be between 0 and 1')
-        if self.tp_margin_pct <= self.sl_margin_pct:
-            issues.append('tp_margin_pct should exceed sl_margin_pct for a positive R/R')
-
-        # ATR feasibility band.
-        if not (0 < self.atr_entry_min_pct < self.atr_entry_max_pct):
-            issues.append('atr_entry_min_pct must be > 0 and < atr_entry_max_pct')
-        if not (0 <= self.min_signal_score <= 4):
-            issues.append('min_signal_score must be between 0 and 4')
-
         for tier in self.account_tiers:
             tid = tier.get('id', '?')
-            if tier.get('margin_per_trade', 0) <= 0:
-                issues.append(f'{tid}: margin_per_trade must be > 0')
+            if tier.get('layer1_margin', 0) <= 0 or tier.get('layer2_margin', 0) <= 0:
+                issues.append(f'{tid}: layer margins must be > 0')
+            exposure = tier.get('layer1_margin', 0) + tier.get('layer2_margin', 0)
+            if exposure > tier.get('max_basket_exposure', 0) + 1e-9:
+                issues.append(f'{tid}: L1+L2 margin exceeds max_basket_exposure')
+            if tier.get('basket_tp_l2', 0) <= tier.get('basket_tp_l1', 0):
+                issues.append(f'{tid}: basket_tp_l2 must exceed basket_tp_l1')
+            for roi_key in ('recovery_roi_target', 'layer1_roi_target'):
+                roi = tier.get(roi_key, 0)
+                if roi <= 0 or roi >= 1:
+                    issues.append(f'{tid}: {roi_key} must be between 0 and 1')
             if tier.get('daily_profit_target', 0) <= 0 or tier.get('daily_loss_limit', 0) <= 0:
                 issues.append(f'{tid}: daily targets must be > 0')
             if tier.get('max_active_symbols', 0) < 1:
                 issues.append(f'{tid}: max_active_symbols must be >= 1')
-            # Single entry: one position per symbol, so max_positions must at
-            # least cover one position per active symbol.
-            if tier.get('max_positions', 0) < tier.get('max_active_symbols', 0):
-                issues.append(f'{tid}: max_positions must be >= max_active_symbols')
+            # Max positions should allow each symbol's basket to reach 2 layers.
+            if tier.get('max_positions', 0) < tier.get('max_active_symbols', 0) * self.recovery_max_layers:
+                issues.append(f'{tid}: max_positions must be >= max_active_symbols × max layers')
             if tier.get('protection_floor', 0) <= 0:
                 issues.append(f'{tid}: protection_floor must be > 0')
-            # Portfolio trailing profit lock: arm trigger must exceed the
-            # minimum-protected floor, and both must be positive.
-            trig = tier.get('portfolio_lock_trigger', 0)
-            floor_lvl = tier.get('portfolio_lock_floor', 0)
-            if trig <= 0 or floor_lvl <= 0:
-                issues.append(f'{tid}: portfolio_lock_trigger/floor must be > 0')
-            elif trig <= floor_lvl:
-                issues.append(f'{tid}: portfolio_lock_trigger must exceed portfolio_lock_floor')
-            # Dynamic protection bands [peak_threshold, pct]: non-empty, ascending
-            # thresholds, pct in (0, 1], and the lowest band must be reachable at
-            # the arm trigger (lowest threshold <= trigger).
-            bands = tier.get('portfolio_protection_bands') or []
-            if not bands:
-                issues.append(f'{tid}: portfolio_protection_bands must not be empty')
-            else:
-                prev_thr = -1.0
-                for band in bands:
-                    if len(band) != 2:
-                        issues.append(f'{tid}: each protection band must be [peak_threshold, pct]')
-                        continue
-                    thr, pct = float(band[0]), float(band[1])
-                    if thr <= prev_thr:
-                        issues.append(f'{tid}: protection band thresholds must strictly ascend')
-                    if not (0 < pct <= 1):
-                        issues.append(f'{tid}: protection band pct must be in (0, 1]')
-                    prev_thr = thr
-                if float(bands[0][0]) > trig + 1e-9:
-                    issues.append(f'{tid}: lowest protection band threshold must be <= arm trigger')
             if tier.get('protection_floor', 0) >= tier.get('max_balance', float('inf')) and tier['max_balance'] != float('inf'):
                 issues.append(f'{tid}: protection_floor should be below the tier ceiling')
-            # The position notional = margin × leverage must clear the exchange
-            # dust floor, else the order would be rejected.
-            notional = tier.get('margin_per_trade', 0) * self.default_leverage
-            if notional + 1e-9 < self.min_notional_floor:
+            # Smaller per-layer margins must still clear the exchange dust floor:
+            # Layer-1 notional = margin × leverage must be ≥ min_notional_floor,
+            # else the smallest entry would be rejected as a dust order.
+            l1_notional = tier.get('layer1_margin', 0) * self.default_leverage
+            if l1_notional + 1e-9 < self.min_notional_floor:
                 issues.append(
-                    f'{tid}: position notional {notional:.2f} (margin×leverage) '
+                    f'{tid}: layer1 notional {l1_notional:.2f} (margin×leverage) '
                     f'is below min_notional_floor {self.min_notional_floor:.2f}'
                 )
-
+        if self.recovery_loss_trigger_usd <= 0:
+            issues.append('recovery_loss_trigger_usd must be > 0')
+        if self.correlation_min_score_additional < self.correlation_min_score_first:
+            issues.append('correlation_min_score_additional must be >= correlation_min_score_first')
         if self.bb_period < 2:
             issues.append('bb_period must be >= 2')
+        if self.basket_hard_sl_usd <= 0:
+            issues.append('basket_hard_sl_usd must be > 0')
+        for sym, override in (self.symbol_roi_overrides or {}).items():
+            for roi_key in ('layer1_roi_target', 'recovery_roi_target'):
+                if roi_key in override:
+                    roi = override[roi_key]
+                    if roi <= 0 or roi >= 1:
+                        issues.append(f'symbol_roi_overrides[{sym}].{roi_key} must be between 0 and 1')
 
         return issues

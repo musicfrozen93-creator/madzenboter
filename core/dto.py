@@ -16,12 +16,12 @@ from typing import List, Optional
 
 @dataclass
 class RecoveryLayer:
-    """The single entry of a position (legacy name retained for DB compatibility).
+    """Represents a single layer in the controlled recovery system.
 
-    SINGLE ENTRY ONLY: every position holds exactly one of these (Layer 1) with
-    its entry price, margin, and quantity. There is no Layer 2, no recovery, no
-    averaging down. The class/table name is kept so the shared database schema
-    (``recovery_layers``) is unchanged.
+    Each basket can have at most 2 layers (Layer 1 initial entry + ONE recovery
+    layer), each with its own entry price, margin, and quantity. The recovery
+    layer is added when price moves against the initial position by an ATR-based
+    distance. There is never a Layer 3+.
     """
 
     layer_number: int
@@ -35,12 +35,11 @@ class RecoveryLayer:
 
 @dataclass
 class Basket:
-    """A single-entry position for one symbol/direction (one layer only).
+    """A basket groups all recovery layers for a single symbol/direction.
 
-    The basket is the primary unit of position management. It holds exactly one
-    layer (single entry — no recovery/averaging), computes aggregate metrics
-    (avg entry, total margin), and monitors unrealised PnL for take-profit and
-    stop-loss logic. The "basket" name is retained for DB-schema compatibility.
+    The basket is the primary unit of position management. It tracks
+    all layers, computes aggregate metrics (avg entry, total margin),
+    and monitors unrealised PnL for take-profit and stop-loss logic.
     """
 
     symbol: str
@@ -193,6 +192,6 @@ class TradeRecord:
     layers_used: int
     entry_time: float
     exit_time: float
-    exit_reason: str  # 'tp', 'sl', 'daily_loss_limit', 'portfolio_profit_lock', 'protection_lock', 'force_close_all', 'reconciled', 'manual'
+    exit_reason: str  # 'basket_tp', 'roi_l1', 'roi_recovery', 'basket_sl', 'daily_loss_limit', 'protection_lock', 'force_close_all', 'manual'
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     account_id: Optional[int] = None  # None = master account

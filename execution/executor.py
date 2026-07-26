@@ -23,6 +23,7 @@ from core.dto import Basket, Signal, TradeRecord
 from core.models import AccountModel
 from exchange.client import ExchangeClient
 from grid.position_manager import PositionManager
+from grid.recovery import RecoverySystem
 from grid.take_profit import TakeProfitManager
 from risk.position_sizer import PositionSizer
 from risk.risk_manager import RiskManager
@@ -353,7 +354,7 @@ class SignalExecutor:
 
         "Managed" means: enabled (is_active) OR currently holding an open basket.
         This ensures that when a subscription expires and the web sets is_active=False,
-        any open positions are still monitored for TP/SL until they close
+        any open positions are still monitored for TP/SL/recovery until they close
         naturally. New entries are blocked separately by the eligibility check in
         execute_signal(), so there is no risk of opening positions for expired accounts.
         """
@@ -407,7 +408,7 @@ class SignalExecutor:
             if not baskets:
                 return
 
-            # Let position manager check/handle take-profit and stop-loss exits
+            # Let position manager check/handle take-profit, stop-loss, and recovery triggers
             position_manager.manage_baskets(baskets, balance)
 
         except Exception as e:
@@ -553,6 +554,7 @@ class SignalExecutor:
             # Create risk + strategy managers (all account-isolated)
             risk_manager = RiskManager(acct_settings, acct_db)
             sizer = PositionSizer(acct_settings)
+            recovery = RecoverySystem(acct_settings)
             tp_manager = TakeProfitManager(acct_settings)
 
             position_manager = PositionManager(
@@ -561,6 +563,7 @@ class SignalExecutor:
                 database=acct_db,
                 risk_manager=risk_manager,
                 position_sizer=sizer,
+                recovery_system=recovery,
                 tp_manager=tp_manager,
                 bot_control=self.bot_control,
             )

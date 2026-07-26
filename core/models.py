@@ -304,7 +304,7 @@ class ExecutionLogModel(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     account_id = Column(Integer, ForeignKey('accounts.id', ondelete='CASCADE'), nullable=False, index=True)
     signal_id = Column(Integer, ForeignKey('signals.id', ondelete='SET NULL'), nullable=True, index=True)
-    action = Column(String(30), nullable=False)  # 'open', 'close', 'sync'
+    action = Column(String(30), nullable=False)  # 'open', 'close', 'recovery', 'sync'
     symbol = Column(String(50), nullable=False)
     side = Column(String(10), nullable=True)
     quantity = Column(Float, nullable=True)
@@ -331,7 +331,7 @@ class ExecutionLogModel(Base):
 # ─────────────────────────────────────────────
 
 class BasketModel(Base):
-    """Position record — holds the single entry layer for a symbol/direction, per-account."""
+    """Basket record — groups recovery layers for a symbol/direction, per-account."""
     __tablename__ = 'baskets'
 
     id = Column(String(36), primary_key=True)  # UUID string
@@ -357,7 +357,7 @@ class BasketModel(Base):
 
 
 class RecoveryLayerModel(Base):
-    """The single entry layer of a position. Table name retained for schema compatibility."""
+    """Recovery layer within a basket."""
     __tablename__ = 'recovery_layers'
 
     id = Column(Integer, primary_key=True, autoincrement=True)

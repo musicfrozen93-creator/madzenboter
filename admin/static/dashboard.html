@@ -479,7 +479,7 @@
             <button class="btn btn-amber btn-full" id="btnEmergency"
                     onclick="confirmAction('emergency-stop',
                       '🚨 Emergency Stop',
-                      'This immediately halts the scanner, signals, and new positions, and cancels all pending orders.\n\nExisting positions remain PROTECTED — TP/SL stays active.\n\nPositions will NOT be force-closed.',
+                      'This immediately halts the scanner, signals, new positions and recovery layers, and cancels all pending orders.\n\nExisting positions remain PROTECTED — TP/SL/trailing stays active.\n\nPositions will NOT be force-closed.',
                       'btn-amber')">
               🚨 Emergency Stop
             </button>
@@ -490,7 +490,7 @@
             <button class="btn btn-danger-full btn-full" id="btnCloseAll"
                     onclick="confirmAction('close-all',
                       '⚠️ Force Close All Positions',
-                      'This will close EVERY open position across ALL accounts.\n\nThis action cannot be undone. Positions will be closed at market price.',
+                      'This will close EVERY open basket across ALL accounts.\n\nThis action cannot be undone. Positions will be closed at market price.',
                       'btn-danger-full')">
               💀 Force Close All Positions
             </button>
@@ -524,7 +524,7 @@
             <div class="flag-row" id="flagManagePos">
               <div>
                 <div class="flag-name">MANAGE_POSITIONS</div>
-                <div class="flag-desc">TP/SL management active</div>
+                <div class="flag-desc">TP/SL/recovery management active</div>
               </div>
               <span class="flag-badge" id="badgeManagePos">…</span>
             </div>

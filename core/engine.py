@@ -108,6 +108,27 @@ class TradingEngine:
         # Per-account trading components (require the encryption key)
         self._init_multi_account()
 
+        # ── V4 strategy feature flag (default OFF — V1 loop is untouched) ──
+        # When enabled, the parallel V4 orchestrator stack (v4/ package) is made
+        # available (a DB-backed unified kill switch is constructed). The V1
+        # mean-reversion basket loop remains the active trading path; the V4
+        # per-account live-loop cutover is the final, paper-gated integration
+        # step and does not run until explicitly wired for a validated account.
+        self._v4_enabled = bool(getattr(self.settings, 'v4_enabled', False))
+        self._v4_kill_switch = None
+        if self._v4_enabled:
+            try:
+                from v4.kill_switch import KillSwitch
+                self._v4_kill_switch = KillSwitch(self.database)
+                logger.warning(
+                    'V4 strategy flag ENABLED — V4 orchestrator stack available '
+                    '(unified kill switch constructed). V1 loop remains active until '
+                    'the paper-validated per-account cutover; set v4_enabled=false to '
+                    'disable.'
+                )
+            except Exception as e:
+                logger.error('V4 initialization failed (staying on V1): %s', e)
+
     # ───────────────────────────────────────────
     # Multi-Account Initialization
     # ───────────────────────────────────────────
@@ -317,13 +338,11 @@ class TradingEngine:
             except Exception as e:
                 logger.error('Failed to load accounts at startup: %s', e)
 
-        # Fixed 100-symbol universe (no scanner / dynamic watchlist). Validate
-        # each against the exchange and drop any delisted/inactive or
-        # high-min-notional symbol — never add replacements.
-        self._symbols = self._validate_universe(list(self.settings.supported_symbols))
+        # Fixed supported-symbol universe (no scanner / dynamic watchlist).
+        self._symbols = list(self.settings.supported_symbols)
         logger.info(
-            'Trading universe (fixed): %d symbols | timeframe=%s',
-            len(self._symbols), self.settings.timeframe,
+            'Trading universe (fixed): %s | timeframe=%s',
+            ', '.join(self._symbols), self.settings.timeframe,
         )
 
         # Validate settings
@@ -473,52 +492,6 @@ class TradingEngine:
                 'skipped=%d (per-account accept/reject logged above)',
                 len(self._symbols), evaluated, found, evaluated - found,
             )
-
-    def _validate_universe(self, symbols: List[str]) -> List[str]:
-        """Validate the fixed universe against the exchange; drop bad symbols.
-
-        Keeps only symbols the exchange reports as active and whose minimum
-        notional fits the smallest (Tier-1) position notional (margin ×
-        leverage). Delisted/renamed or high-min-notional symbols are dropped and
-        logged. NEVER adds replacements — the universe stays fixed at whatever
-        subset of the configured 100 is currently tradeable.
-        """
-        markets = getattr(self.exchange_client, 'markets', None) or {}
-        if not markets:
-            logger.warning(
-                'UNIVERSE_VALIDATION skipped — no markets loaded; using the '
-                'configured %d symbols as-is.', len(symbols),
-            )
-            return symbols
-
-        # Smallest position notional the bot will ever send (Tier 1).
-        tier1 = self.settings.account_tiers[0]
-        min_notional_capacity = tier1.get('margin_per_trade', 0) * self.settings.default_leverage
-
-        kept: List[str] = []
-        dropped: List[str] = []
-        for sym in symbols:
-            market = markets.get(sym)
-            if not market or not market.get('active', False):
-                dropped.append(f'{sym}(inactive/missing)')
-                continue
-            min_cost = (
-                (market.get('limits', {}).get('cost', {}) or {}).get('min')
-                or self.settings.min_notional_floor
-            )
-            if min_cost > min_notional_capacity + 1e-9:
-                dropped.append(f'{sym}(min_notional {min_cost:.1f}>{min_notional_capacity:.1f})')
-                continue
-            kept.append(sym)
-
-        if dropped:
-            logger.warning(
-                'UNIVERSE_VALIDATED | kept=%d dropped=%d: %s',
-                len(kept), len(dropped), ', '.join(dropped),
-            )
-        else:
-            logger.info('UNIVERSE_VALIDATED | all %d symbols tradeable', len(kept))
-        return kept
 
     def _log_status(self) -> None:
         """Log periodic engine status every 5 minutes (account-based).

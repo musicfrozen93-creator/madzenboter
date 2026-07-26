@@ -731,7 +731,7 @@ class Database:
 
         Args:
             account_id: Account that executed.
-            action: Action type ('open', 'close', 'sync').
+            action: Action type ('open', 'close', 'recovery', 'sync').
             symbol: Trading pair.
             status: Result status ('success', 'failed', 'skipped').
             signal_id: Associated signal ID if applicable.

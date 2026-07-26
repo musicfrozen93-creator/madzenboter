@@ -154,7 +154,7 @@ class TradeResponse(BaseModel):
         leverage: Leverage multiplier.
         pnl: Realised profit/loss in USDT.
         fee: Total fees paid.
-        layers_used: Number of entry layers used (always 1 for single-entry positions).
+        layers_used: Number of recovery layers used.
         entry_time: Unix timestamp of the initial entry.
         exit_time: Unix timestamp of the exit.
         exit_reason: Why the trade was closed (TP, SL, etc.).

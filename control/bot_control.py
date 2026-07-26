@@ -2,15 +2,21 @@
 
 Thread-safe singleton that governs the bot's operational state:
   - BOT_ENABLED: whether the scanner runs and new trades can open.
-  - MANAGE_EXISTING_POSITIONS: whether TP/SL runs on open positions.
+  - MANAGE_EXISTING_POSITIONS: whether TP/SL/recovery runs on open baskets.
   - FORCE_CLOSE_ALL: one-shot flag to safely close every open position.
-  - EMERGENCY_STOP: immediately halts scanner, signals, and new positions;
-    cancels pending orders; but leaves TP/SL/risk management fully active.
-    Positions are NOT force-closed.
+  - EMERGENCY_STOP: immediately halts scanner, signals, new positions and
+    recovery layers; cancels pending orders; but leaves TP/SL/trailing/
+    risk management fully active.  Positions are NOT force-closed.
 
 Environment variables set the initial state; the admin API can override
 at runtime. State resets to env-var defaults on restart (intentional —
 no accidental "stuck disabled" after a deploy).
+
+Recovery layer logic:
+  Recovery layers are new exchange orders and are blocked whenever
+  EITHER bot_enabled OR manage_existing_positions is False, or whenever
+  emergency_stop or force_close_all is active.  Both flags must be True
+  (and neither override active) for recovery layers to proceed.
 """
 
 import logging
@@ -48,8 +54,11 @@ class BotControl:
     events trivially greppable in production logs.
 
     Guard methods (call these at every decision point):
-      can_open_trades()        — True when new positions may open.
-      can_manage_positions()   — True when TP/SL position management may run.
+      can_open_trades()        — True when new positions/baskets may open.
+      can_manage_positions()   — True when TP/SL/basket management may run.
+      can_add_recovery_layer() — True when a recovery layer order may be placed.
+                                 Requires BOTH bot_enabled AND manage_existing,
+                                 plus neither force_close_all nor emergency_stop.
     """
 
     def __init__(self) -> None:
@@ -109,8 +118,25 @@ class BotControl:
         )
 
     def can_manage_positions(self) -> bool:
-        """True when existing-position management (TP/SL) may run."""
+        """True when existing-position management (TP/SL/trailing) may run."""
         return self._manage_existing
+
+    def can_add_recovery_layer(self) -> bool:
+        """True when a recovery layer order may be placed.
+
+        Recovery layers are new exchange orders so they require:
+          • bot_enabled = True
+          • manage_existing_positions = True
+          • force_close_all = False
+          • emergency_stop = False
+        Both top-level flags must be active and neither override may be set.
+        """
+        return (
+            self._bot_enabled
+            and self._manage_existing
+            and not self._force_close_all
+            and not self._emergency_stop
+        )
 
     def snapshot(self) -> ControlSnapshot:
         with self._lock:
@@ -174,8 +200,9 @@ class BotControl:
           • Scanner
           • Signal execution
           • New position opening
+          • Recovery layer placement
 
-        Deliberately does NOT touch TP/SL/risk management —
+        Deliberately does NOT touch TP/SL/trailing/risk management —
         existing positions remain fully protected.
         Positions are NOT force-closed (use request_force_close_all for that).
         Pending order cancellation must be handled by the caller (executor).
@@ -191,7 +218,8 @@ class BotControl:
         control_logger.info('[CONTROL] EMERGENCY STOP ACTIVATED')
         control_logger.info('[CONTROL] New Trades Disabled')
         control_logger.info('[CONTROL] Scanner Disabled')
-        control_logger.info('[CONTROL] TP/SL remain ACTIVE — positions protected')
+        control_logger.info('[CONTROL] Recovery Layers Disabled')
+        control_logger.info('[CONTROL] TP/SL/Trailing remain ACTIVE — positions protected')
 
     def clear_emergency_stop(self) -> None:
         """Deactivate EMERGENCY_STOP mode and re-enable the bot."""

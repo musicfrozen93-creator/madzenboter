@@ -87,10 +87,11 @@ async def bot_emergency_stop(
       • Scanner
       • Signal execution
       • New position opening
+      • Recovery layer placement
       • Cancels all pending (open) orders across all accounts
 
-    Does NOT close existing positions — TP/SL/risk management remain fully
-    active. Use /close-all to force-close all positions.
+    Does NOT close existing positions — TP/SL/trailing/risk management
+    remain fully active. Use /close-all to force-close all positions.
     """
     bot_control.set_emergency_stop()
     control_logger.info('[CONTROL] Emergency Stop requested via Admin API')
@@ -181,7 +182,7 @@ async def bot_close_all(
 async def enable_position_management(
     bot_control: BotControl = Depends(get_bot_control),
 ):
-    """Enable active management (TP/SL) of existing positions."""
+    """Enable active management (TP/SL/recovery) of existing positions."""
     bot_control.enable_position_management()
     return {
         'message': 'Position management enabled',
@@ -194,7 +195,7 @@ async def enable_position_management(
 async def disable_position_management(
     bot_control: BotControl = Depends(get_bot_control),
 ):
-    """Disable active management — monitoring only, no close orders."""
+    """Disable active management — monitoring only, no close/recovery orders."""
     bot_control.disable_position_management()
     return {
         'message': 'Position management disabled (monitoring only)',

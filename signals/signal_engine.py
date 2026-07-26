@@ -144,7 +144,7 @@ class SignalEngine:
         self, df, side, rsi, price, candle_low, candle_high,
         bb_lower, bb_upper, btc_regime, spread,
     ):
-        """Score the setup 0–4 for the signal quality gate (min_signal_score).
+        """Score the setup 0–4 for the correlation second-symbol rule.
 
         +1 RSI extreme (< 20 or > 80)
         +1 strong Bollinger penetration (the CLOSE pierces the band, not just a wick)
@@ -259,20 +259,6 @@ class SignalEngine:
                 logger.info(
                     'SIGNAL_SKIP | symbol=%s reason=%s rsi=%.1f price=%.6f',
                     symbol, skip, latest_rsi, current_price,
-                )
-                return None
-
-            # ── ATR feasibility band (medium-volatility entry gate) ──
-            # Skip unless ATR(14)/price is inside the band, so the fixed % stop is
-            # never inside pure noise (ATR too high) and the fixed % target stays
-            # reachable in reasonable time (ATR too low).
-            atr_pct = (latest_atr / current_price) if current_price > 0 else 0.0
-            if atr_pct < s.atr_entry_min_pct or atr_pct > s.atr_entry_max_pct:
-                logger.info(
-                    'SIGNAL_SKIP | symbol=%s reason=atr_out_of_band '
-                    '(atr_pct=%.4f%% band=[%.2f%%,%.2f%%]) rsi=%.1f price=%.6f',
-                    symbol, atr_pct * 100, s.atr_entry_min_pct * 100,
-                    s.atr_entry_max_pct * 100, latest_rsi, current_price,
                 )
                 return None
 

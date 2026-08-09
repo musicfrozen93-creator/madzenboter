@@ -1,0 +1,68 @@
+version: '3.8'
+
+# Zentry AI — backend stack.
+#
+#   Next.js frontend (separate deploy)
+#        ↓ REST
+#   analysis-api  ← this service: market data, technical analysis, signals
+#        ↓
+#   postgres      ← shared with the website (users, subscriptions, signals)
+#
+# The analysis service holds NO exchange credentials and cannot place an order.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: zengrid-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: zengrid
+      POSTGRES_USER: zengrid
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zengrid_dev_password}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zengrid -d zengrid"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  analysis-api:
+    build: .
+    container_name: zentry-analysis-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - TZ=UTC
+      # No exchange API key exists anywhere in this stack — the analysis
+      # service uses public market data only and never places an order.
+      - DATABASE_URL=postgresql://zengrid:${POSTGRES_PASSWORD:-zengrid_dev_password}@postgres:5432/zengrid
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - API_WORKERS=${API_WORKERS:-2}
+      # Optional: enables the forex market (read-only market data). Crypto works
+      # without it. Leave blank to offer crypto only.
+      - TWELVEDATA_API_KEY=${TWELVEDATA_API_KEY:-}
+    ports:
+      - "${API_PORT:-8000}:8000"
+    volumes:
+      - logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pgdata:
+  logs:

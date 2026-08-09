@@ -1,0 +1,36 @@
+{
+    "use_testnet": false,
+
+    "supported_symbols": [
+        "TRX/USDT:USDT", "XRP/USDT:USDT", "XLM/USDT:USDT", "ADA/USDT:USDT",
+        "ALGO/USDT:USDT", "HBAR/USDT:USDT", "VET/USDT:USDT", "LINK/USDT:USDT",
+        "DOT/USDT:USDT", "ATOM/USDT:USDT", "LTC/USDT:USDT", "POL/USDT:USDT",
+        "ETC/USDT:USDT", "BCH/USDT:USDT", "NEAR/USDT:USDT", "EOS/USDT:USDT",
+        "FIL/USDT:USDT", "IOTA/USDT:USDT", "GRT/USDT:USDT", "AVAX/USDT:USDT"
+    ],
+    "btc_symbol": "BTC/USDT:USDT",
+
+    "timeframe": "15m",
+    "candle_limit": 300,
+
+    "rsi_period": 14,
+    "rsi_oversold": 30.0,
+    "rsi_overbought": 70.0,
+    "bb_period": 20,
+    "bb_std": 2.0,
+    "atr_period": 14,
+
+    "btc_filter_enabled": true,
+    "btc_ema_fast": 50,
+    "btc_ema_slow": 200,
+    "btc_regime_cache_seconds": 300,
+
+    "risk_filter_lookback": 30,
+    "max_spread_pct": 0.0010,
+    "atr_explosion_multiplier": 2.5,
+    "news_candle_atr_multiplier": 2.5,
+    "volume_spike_multiplier": 3.0,
+
+    "database_url": "postgresql://zengrid:zengrid@localhost:5432/zengrid",
+    "log_level": "INFO"
+}

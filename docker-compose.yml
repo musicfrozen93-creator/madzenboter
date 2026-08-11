@@ -53,8 +53,29 @@ services:
       # Optional: enables the forex market (read-only market data). Crypto works
       # without it. Leave blank to offer crypto only.
       - TWELVEDATA_API_KEY=${TWELVEDATA_API_KEY:-}
+    # The container always listens on 8000. Other containers on the same Docker
+    # network (e.g. a reverse proxy) reach it at http://zentry-analysis-api:8000
+    # WITHOUT a host publish — this avoids the "port is already allocated"
+    # conflict entirely.
+    expose:
+      - "8000"
+    # HOST PUBLISH — the HOST-side port is configurable so a conflict on 8000 is
+    # trivial to resolve (set ANALYSIS_HOST_PORT to a free port). PREFERRED
+    # production setup: put this service behind your existing reverse proxy on
+    # the shared Docker network and DELETE this `ports:` block so no host port is
+    # published at all (see DEPLOYMENT.md).
     ports:
-      - "${API_PORT:-8000}:8000"
+      - "${ANALYSIS_HOST_PORT:-8000}:8000"
+    # Reverse-proxy deployments: uncomment and set to your proxy's network so the
+    # proxy can route a public https://api.<domain> to this container internally.
+    # networks:
+    #   - proxy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
     volumes:
       - logs:/app/logs
     logging:
@@ -62,6 +83,11 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+# Uncomment to join an existing reverse-proxy network (name must match yours):
+# networks:
+#   proxy:
+#     external: true
 
 volumes:
   pgdata:

@@ -43,6 +43,12 @@ TIMEFRAMES: tuple[str, ...] = (
     '1d', '3d', '1w',
 )
 
+# The timeframes a USER may select as their entry (trade) timeframe. This is a
+# deliberate product restriction and is intentionally NARROWER than TIMEFRAMES:
+# the multi-timeframe engine still analyses higher timeframes (1h/4h/1d/1w)
+# internally for confirmation, but only these four may be requested via the API.
+TRADEABLE_TIMEFRAMES: tuple[str, ...] = ('15m', '30m', '1h', '4h')
+
 # Duration of each canonical timeframe in seconds. Used to order timeframes and
 # to size cache TTLs against the bar interval.
 TIMEFRAME_SECONDS: dict[str, int] = {

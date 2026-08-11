@@ -12,6 +12,7 @@ from api.schemas import AnalyzeRequest, AnalyzeResponse, ErrorResponse
 from api.serializers import to_analyze_response
 from config.settings import Settings
 from providers.base import (
+    TRADEABLE_TIMEFRAMES,
     MarketDataUnavailableError,
     UnknownSymbolError,
     UnsupportedTimeframeError,
@@ -58,6 +59,17 @@ def analyze(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
         ) from exc
+
+    # Product restriction: only the four tradeable entry timeframes may be
+    # requested. Higher timeframes remain available to the engine internally.
+    if timeframe not in TRADEABLE_TIMEFRAMES:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f'Timeframe {timeframe!r} is not selectable. '
+                f'Choose one of: {", ".join(TRADEABLE_TIMEFRAMES)}.'
+            ),
+        )
 
     try:
         provider = get_provider(settings, payload.market, payload.provider)

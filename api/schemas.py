@@ -47,6 +47,15 @@ class AnalyzeRequest(BaseModel):
         description='Optional explicit provider name. Omit to use the market default.',
         examples=['binance'],
     )
+    enabled_indicators: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            'Optional list of analysis module keys to include (e.g. ["rsi","macd"]). '
+            'Omit to use every module. Required core modules are always included; '
+            'unknown names are ignored.'
+        ),
+        examples=[['rsi', 'macd', 'ema', 'market_structure']],
+    )
 
 
 # ─────────────────────────────────────────────
@@ -480,6 +489,10 @@ class AnalyzeResponse(BaseModel):
     quality_grade: str = Field(description="e.g. 'High Quality'")
     confidence: int = Field(description='Engine certainty, 0–100.')
     confidence_grade: str = Field(description="e.g. 'High'")
+    enabled_indicators: List[str] = Field(
+        default_factory=list,
+        description='Analysis module keys that participated in this result.',
+    )
 
     entry: Optional[float] = Field(default=None, description='Null when WAIT.')
     sl: Optional[float] = Field(default=None, description='Null when WAIT.')
@@ -547,6 +560,22 @@ class SymbolsResponse(BaseModel):
     timeframes: List[str]
     symbols: List[str]
     count: int
+
+
+class IndicatorModel(BaseModel):
+    """One analysis module, for the configuration UI."""
+
+    key: str
+    label: str
+    category: str
+    weight: int
+    required: bool
+
+
+class IndicatorsResponse(BaseModel):
+    """GET /api/indicators — the analysis modules the engine supports."""
+
+    indicators: List[IndicatorModel]
 
 
 class HealthResponse(BaseModel):

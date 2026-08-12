@@ -24,6 +24,7 @@ from analysis.modules import (
     ModuleVote,
     evaluate_modules,
 )
+from typing import FrozenSet
 from analysis.structure import BEARISH, BULLISH, RANGE
 from analysis.timeframes import MultiTimeframePicture, TREND
 from v4.params import V4Params
@@ -52,6 +53,10 @@ class ConfluenceResult:
     hard_conflicts: List[str] = field(default_factory=list)
     timeframe_agreement: float = 0.0             # 0–1 across the internal ladder
     reason: str = ''
+    # The modules that participated in this read. A user-disabled optional module
+    # is absent here (and from `votes`), so the scorers exclude it from BOTH the
+    # earned points and the maximum — never treating it as evidence against.
+    enabled_modules: FrozenSet[str] = field(default_factory=lambda: frozenset(MODULE_ORDER))
 
     @property
     def has_direction(self) -> bool:
@@ -86,9 +91,23 @@ class ConfluenceEngine:
     def __init__(self, params: Optional[V4Params] = None) -> None:
         self.params = params or V4Params()
 
-    def evaluate(self, mtf: MultiTimeframePicture) -> ConfluenceResult:
-        """Aggregate every module vote for a multi-timeframe picture."""
-        votes = evaluate_modules(mtf)
+    def evaluate(
+        self,
+        mtf: MultiTimeframePicture,
+        enabled_modules: Optional[FrozenSet[str]] = None,
+    ) -> ConfluenceResult:
+        """Aggregate module votes for a multi-timeframe picture.
+
+        Args:
+            enabled_modules: The modules the user chose to include. ``None`` uses
+                all modules (default). A module NOT in this set casts no vote: it
+                is excluded from the aggregation, the conflict checks, and the
+                score denominators — it is neutral/excluded, never negative.
+        """
+        active = frozenset(MODULE_ORDER) if enabled_modules is None else enabled_modules
+        # Every module is still computed (pure and cheap), then filtered to the
+        # active set so disabled modules simply do not participate.
+        votes = [v for v in evaluate_modules(mtf) if v.module in active]
 
         bullish = sum(v.weighted_strength for v in votes if v.direction == BULLISH_VOTE)
         bearish = sum(v.weighted_strength for v in votes if v.direction == BEARISH_VOTE)
@@ -98,6 +117,7 @@ class ConfluenceEngine:
             return ConfluenceResult(
                 direction=RANGE, votes=votes,
                 timeframe_agreement=mtf.alignment,
+                enabled_modules=active,
                 reason='no module expressed a direction',
             )
 
@@ -110,6 +130,7 @@ class ConfluenceEngine:
                 direction=RANGE, votes=votes,
                 bullish_weight=round(bullish, 2), bearish_weight=round(bearish, 2),
                 timeframe_agreement=mtf.alignment,
+                enabled_modules=active,
                 reason='bullish and bearish evidence are exactly balanced',
             )
 
@@ -150,6 +171,7 @@ class ConfluenceEngine:
             conflicts=conflicts,
             hard_conflicts=hard,
             timeframe_agreement=mtf.alignment,
+            enabled_modules=active,
             reason=(
                 f'{direction} by {agreement:.0%} of cast module weight '
                 f'({bullish:.1f} bullish vs {bearish:.1f} bearish)'

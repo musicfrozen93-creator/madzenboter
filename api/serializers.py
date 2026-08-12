@@ -297,6 +297,7 @@ def to_analyze_response(result: AnalysisResult) -> AnalyzeResponse:
         quality_grade=result.quality.grade,
         confidence=result.confidence.value,
         confidence_grade=result.confidence.grade,
+        enabled_indicators=sorted(confluence.enabled_modules),
 
         entry=signal.entry,
         sl=signal.stop_loss,

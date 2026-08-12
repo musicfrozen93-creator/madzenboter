@@ -78,6 +78,97 @@ MODULE_ORDER: tuple[str, ...] = (
 # zeroed for "opposing", because they have no side to oppose with.
 STRENGTH_MODULES: frozenset = frozenset({ATR, ADX})
 
+# ── Required vs optional (user-configurable) modules ──
+# The user may switch OPTIONAL modules off; REQUIRED modules are fundamental to
+# reading direction/structure and can never be disabled — the engine would have
+# nothing to anchor a signal to without them.
+#
+# A disabled optional module is EXCLUDED from the analysis entirely: it casts no
+# vote, so it counts neither FOR nor AGAINST the setup, and its weight leaves
+# BOTH the numerator and the denominator of the Quality/Confidence scores. It is
+# never treated as bearish/bullish evidence. See analysis.scoring for the exact
+# normalisation.
+REQUIRED_MODULES: frozenset = frozenset({TREND, STRUCTURE})
+OPTIONAL_MODULES: frozenset = frozenset(MODULE_ORDER) - REQUIRED_MODULES
+
+# Human-facing registry, surfaced to the dashboard so the UI never hardcodes a
+# second indicator list. category groups the checkboxes; required==True renders
+# as an always-on "Core Analysis" item.
+MODULE_CATEGORY: Dict[str, str] = {
+    TREND: 'Trend & Structure',
+    STRUCTURE: 'Trend & Structure',
+    ELLIOTT: 'Price Action',
+    FIBONACCI: 'Price Action',
+    SUPPORT_RESISTANCE: 'Price Action',
+    PATTERN: 'Price Action',
+    RSI: 'Momentum',
+    MACD: 'Momentum',
+    ADX: 'Momentum',
+    VOLUME: 'Volume & Volatility',
+    ATR: 'Volume & Volatility',
+    VWAP: 'Volume & Volatility',
+    ORDER_BLOCK: 'Smart Money',
+    FVG: 'Smart Money',
+    LIQUIDITY: 'Smart Money',
+}
+
+MODULE_LABEL: Dict[str, str] = {
+    TREND: 'Trend (multi-timeframe)',
+    STRUCTURE: 'Market Structure',
+    ELLIOTT: 'Elliott Wave',
+    FIBONACCI: 'Fibonacci',
+    VOLUME: 'Volume',
+    RSI: 'RSI',
+    ATR: 'ATR / Volatility',
+    SUPPORT_RESISTANCE: 'Support & Resistance',
+    ORDER_BLOCK: 'Order Blocks',
+    FVG: 'Fair Value Gaps',
+    LIQUIDITY: 'Liquidity',
+    VWAP: 'VWAP',
+    MACD: 'MACD',
+    ADX: 'ADX (Trend Strength)',
+    PATTERN: 'Chart Patterns',
+}
+
+
+def describe_modules() -> List[dict]:
+    """Registry of every analysis module for the configuration UI.
+
+    The single source of truth for which indicators exist, their weight, their
+    category, and whether they are required. The frontend renders this list; it
+    never invents indicators of its own.
+    """
+    return [
+        {
+            'key': key,
+            'label': MODULE_LABEL.get(key, key),
+            'category': MODULE_CATEGORY.get(key, 'Other'),
+            'weight': MODULE_WEIGHTS[key],
+            'required': key in REQUIRED_MODULES,
+        }
+        for key in MODULE_ORDER
+    ]
+
+
+def resolve_enabled_modules(requested) -> frozenset:
+    """Resolve a user's requested module selection to the set actually used.
+
+    Rules (see REQUIRED_MODULES for the rationale):
+      * ``None`` → every module (the default, fully backward-compatible).
+      * Otherwise → the REQUIRED modules are always forced on, plus whichever
+        OPTIONAL modules were requested. Unknown/misspelled names are ignored
+        (never trusted, never able to name arbitrary internals).
+
+    Returns:
+        A frozenset of valid module keys, always a superset of REQUIRED_MODULES.
+    """
+    if requested is None:
+        return frozenset(MODULE_ORDER)
+    requested_set = {str(m).strip().lower() for m in requested if str(m).strip()}
+    chosen_optional = requested_set & OPTIONAL_MODULES
+    return frozenset(REQUIRED_MODULES | chosen_optional)
+
+
 assert sum(MODULE_WEIGHTS.values()) == 100, 'module weights must total 100'
 
 

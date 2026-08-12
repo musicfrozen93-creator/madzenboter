@@ -8,8 +8,16 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
+from analysis.modules import describe_modules
 from api.dependencies import get_settings
-from api.schemas import ErrorResponse, MarketsResponse, ProviderModel, SymbolsResponse
+from api.schemas import (
+    ErrorResponse,
+    IndicatorModel,
+    IndicatorsResponse,
+    MarketsResponse,
+    ProviderModel,
+    SymbolsResponse,
+)
 from config.settings import Settings
 from providers.registry import (
     UnknownProviderError,
@@ -34,6 +42,23 @@ def list_markets(settings: Settings = Depends(get_settings)) -> MarketsResponse:
     return MarketsResponse(
         markets=available_markets(),
         providers=[ProviderModel(**p) for p in describe_providers()],
+    )
+
+
+@router.get(
+    '/indicators',
+    response_model=IndicatorsResponse,
+    summary='List every analysis module the engine supports',
+)
+def list_indicators() -> IndicatorsResponse:
+    """The analysis-module registry, for the Analyze page's configuration UI.
+
+    The single source of truth for which indicators exist. The frontend renders
+    this list and never invents indicators of its own. `required` modules cannot
+    be disabled; the rest are user-configurable.
+    """
+    return IndicatorsResponse(
+        indicators=[IndicatorModel(**m) for m in describe_modules()]
     )
 
 

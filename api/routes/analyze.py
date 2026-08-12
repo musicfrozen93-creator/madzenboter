@@ -6,6 +6,7 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
+from analysis.modules import resolve_enabled_modules
 from analysis.pipeline import SignalPipeline
 from api.dependencies import get_pipeline, get_settings
 from api.schemas import AnalyzeRequest, AnalyzeResponse, ErrorResponse
@@ -84,8 +85,13 @@ def analyze(
             detail=f'Market data provider unavailable: {exc}',
         ) from exc
 
+    # Resolve the user's optional indicator selection against the module
+    # allowlist. Unknown names are ignored and required modules are always kept,
+    # so a client can never name an arbitrary internal function.
+    enabled_modules = resolve_enabled_modules(payload.enabled_indicators)
+
     try:
-        result = pipeline.run(provider, symbol, timeframe)
+        result = pipeline.run(provider, symbol, timeframe, enabled_modules=enabled_modules)
     except (UnknownSymbolError, UnsupportedTimeframeError) as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)

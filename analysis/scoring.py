@@ -78,6 +78,26 @@ CONFIDENCE_BUDGET = {
     'indicator_agreement': 10,
 }
 
+# Which module backs each confidence component. When that module is disabled by
+# the user, the component is dropped and the remaining component budgets are
+# renormalised to 100 — so disabling an optional module does not penalise
+# confidence any more than it penalises quality. Components mapped to None are
+# always present (they come from required/aggregate data, not one optional
+# module).
+CONFIDENCE_COMPONENT_MODULE = {
+    'timeframe_agreement': None,
+    'trend_consistency': None,
+    'wave_certainty': ELLIOTT,
+    'order_block_agreement': ORDER_BLOCK,
+    'liquidity_agreement': LIQUIDITY,
+    'fvg_agreement': FVG,
+    'pattern_agreement': PATTERN,
+    'volume_confirmation': VOLUME,
+    'rsi_confirmation': RSI,
+    'data_quality': None,
+    'indicator_agreement': None,
+}
+
 # Penalty per conflict, subtracted from confidence.
 SOFT_CONFLICT_PENALTY = 4
 HARD_CONFLICT_PENALTY = 12
@@ -152,7 +172,7 @@ class QualityScorer:
     def score(
         self, mtf: MultiTimeframePicture, confluence: ConfluenceResult
     ) -> Score:
-        """Award each module its weight scaled by how well it supports the side.
+        """Award each ENABLED module its weight scaled by how well it supports the side.
 
             agrees   → weight x strength          (full credit)
             neutral  → weight x strength x 0.5    (partial — not evidence against)
@@ -160,13 +180,29 @@ class QualityScorer:
 
         ATR is always directionless: its strength IS volatility suitability, so
         it takes full credit for being suitable.
+
+        DISABLED modules (not in ``confluence.enabled_modules``) are excluded
+        entirely: they earn no points AND their weight is removed from the
+        maximum, so the final 0–100 value is ``earned / enabled_weight * 100``.
+        A disabled module therefore never lowers the score — it is neutral, not
+        negative. With every module enabled the enabled weight is 100 and this
+        reduces to the original ``sum(points)``, so default behaviour is
+        unchanged.
         """
         side = _effective_side(confluence)
+        enabled = confluence.enabled_modules
         components: List[ScoreComponent] = []
+        enabled_weight = 0
 
         for module in MODULE_ORDER:
+            if module not in enabled:
+                # User-disabled: not part of the setup at all. Excluded from both
+                # the earned points and the maximum — never a penalty.
+                continue
+
             vote = confluence.vote(module)
             max_points = MODULE_WEIGHTS[module]
+            enabled_weight += max_points
             if vote is None:
                 components.append(ScoreComponent(
                     module, 0.0, max_points, 'Not evaluated',
@@ -197,8 +233,11 @@ class QualityScorer:
                 detail=f'{vote.detail} — {basis}',
             ))
 
-        total = int(round(sum(c.points for c in components)))
-        total = max(0, min(100, total))
+        earned = sum(c.points for c in components)
+        # Normalise against the ENABLED weight so disabling optional modules
+        # neither penalises nor makes the tradeable threshold impossible.
+        normalized = (earned / enabled_weight * 100) if enabled_weight > 0 else 0.0
+        total = max(0, min(100, int(round(normalized))))
         return Score(value=total, grade=grade_for(total), components=components)
 
 
@@ -211,34 +250,57 @@ class ConfidenceScorer:
     def score(
         self, mtf: MultiTimeframePicture, confluence: ConfluenceResult
     ) -> Score:
-        """Combine agreement, certainty, and data quality, less conflict penalties."""
-        side = _effective_side(confluence)
-        components: List[ScoreComponent] = []
+        """Combine agreement, certainty, and data quality, less conflict penalties.
 
-        components.append(self._timeframe_agreement(mtf, side))
-        components.append(self._trend_consistency(mtf))
-        components.append(self._wave_certainty(confluence))
+        Components backed by a user-disabled module are removed and the remaining
+        component budgets are renormalised to 100, so disabling an optional
+        module never penalises confidence (mirrors the Quality Score treatment).
+        With every module enabled the kept budgets already total 100, so the
+        default behaviour is unchanged.
+        """
+        side = _effective_side(confluence)
+        enabled = confluence.enabled_modules
+        built: List[ScoreComponent] = []
+
+        built.append(self._timeframe_agreement(mtf, side))
+        built.append(self._trend_consistency(mtf))
+        built.append(self._wave_certainty(confluence))
         # Smart Money agreement (Phase 2).
-        components.append(self._directional_confirmation(
+        built.append(self._directional_confirmation(
             confluence, ORDER_BLOCK, 'order_block_agreement', side, 'Order block agreement'
         ))
-        components.append(self._directional_confirmation(
+        built.append(self._directional_confirmation(
             confluence, LIQUIDITY, 'liquidity_agreement', side, 'Liquidity agreement'
         ))
-        components.append(self._directional_confirmation(
+        built.append(self._directional_confirmation(
             confluence, FVG, 'fvg_agreement', side, 'FVG agreement'
         ))
-        components.append(self._directional_confirmation(
+        built.append(self._directional_confirmation(
             confluence, PATTERN, 'pattern_agreement', side, 'Pattern agreement'
         ))
-        components.append(self._directional_confirmation(
+        built.append(self._directional_confirmation(
             confluence, VOLUME, 'volume_confirmation', side, 'Volume confirmation'
         ))
-        components.append(self._directional_confirmation(
+        built.append(self._directional_confirmation(
             confluence, RSI, 'rsi_confirmation', side, 'RSI confirmation'
         ))
-        components.append(self._data_quality(mtf))
-        components.append(self._indicator_agreement(confluence, side))
+        built.append(self._data_quality(mtf))
+        built.append(self._indicator_agreement(confluence, side))
+
+        # Keep only components whose backing module is enabled (None = always).
+        kept = [
+            c for c in built
+            if CONFIDENCE_COMPONENT_MODULE.get(c.name) in (None,)
+            or CONFIDENCE_COMPONENT_MODULE.get(c.name) in enabled
+        ]
+        kept_budget = sum(c.max_points for c in kept)
+        # Renormalise the kept components back to a 100-point base so a dropped
+        # component leaves no hole in the score.
+        factor = (100.0 / kept_budget) if kept_budget > 0 else 0.0
+        components: List[ScoreComponent] = [
+            ScoreComponent(c.name, c.points * factor, c.max_points * factor, c.label, c.detail)
+            for c in kept
+        ]
 
         subtotal = sum(c.points for c in components)
         penalty_component = self._conflict_penalty(confluence)

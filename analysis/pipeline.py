@@ -90,8 +90,14 @@ class SignalPipeline:
         symbol: str,
         timeframe: str,
         candle_limit: Optional[int] = None,
+        enabled_modules=None,
     ) -> AnalysisResult:
         """Analyse one symbol on one timeframe and return the full result.
+
+        Args:
+            enabled_modules: Optional frozenset of module keys the user chose to
+                include (see analysis.modules.resolve_enabled_modules). ``None``
+                uses every module — the default, fully backward-compatible path.
 
         Raises:
             providers.base.ProviderError: On any market-data failure.
@@ -101,7 +107,7 @@ class SignalPipeline:
         scope = RequestScope()
 
         mtf = self.mtf_engine.build(provider, symbol, timeframe, scope=scope)
-        confluence = self.confluence_engine.evaluate(mtf)
+        confluence = self.confluence_engine.evaluate(mtf, enabled_modules=enabled_modules)
 
         precision = self._price_precision(provider, symbol, scope)
         quality = self.quality_scorer.score(mtf, confluence)

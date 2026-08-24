@@ -33,6 +33,7 @@ class V4Params:
     # extensions of the dominant leg, and the structural measured move). These
     # ratios only define the reward:risk floor a setup must clear.
     min_rr: float = 1.5                   # reject setups below this reward:risk
+    min_tp1_rr: float = 0.75              # TP1 must clear this R:R on its own
     target_rr: float = 2.0
     partial_trigger_rr: float = 1.5
 

@@ -57,6 +57,15 @@ class ConfluenceResult:
     # is absent here (and from `votes`), so the scorers exclude it from BOTH the
     # earned points and the maximum — never treating it as evidence against.
     enabled_modules: FrozenSet[str] = field(default_factory=lambda: frozenset(MODULE_ORDER))
+    # Phase 2A: ICT-MSNR contextual confluence. This is CONTEXTUAL evidence
+    # from the relationship-based ICT-MSNR engine — it does NOT add weighted
+    # votes to the module aggregation, it provides an independent directional
+    # opinion that the generator and scorers can consult.
+    ict_msnr_direction: str = RANGE              # 'bullish' | 'bearish' | 'range'
+    ict_msnr_strength: float = 0.0               # 0–1
+    ict_msnr_score: float = 0.0                  # 0–1
+    ict_msnr_conflicts: List[str] = field(default_factory=list)
+    ict_msnr_explanation: str = ''
 
     @property
     def has_direction(self) -> bool:
@@ -162,6 +171,29 @@ class ConfluenceEngine:
                 f'(needs {MIN_AGREEMENT:.0%})'
             )
 
+        # ── ICT-MSNR contextual confluence (Phase 2A) ──
+        # Read the ICT-MSNR confluence from the entry picture. It is stored
+        # there by the Analysis Engine and consumed as CONTEXTUAL evidence.
+        ict_conf = mtf.entry.ict_confluence
+        ict_msnr_direction = getattr(ict_conf, 'direction', RANGE) or RANGE
+        ict_msnr_strength = getattr(ict_conf, 'strength', 0.0)
+        ict_msnr_score = getattr(ict_conf, 'score', 0.0)
+        ict_msnr_conflicts = getattr(ict_conf, 'conflicts', [])
+        ict_msnr_explanation = getattr(ict_conf, 'explanation', '')
+
+        # If ICT-MSNR strongly opposes the module-vote direction, record it
+        # as a soft conflict (not a hard one — ICT-MSNR is contextual, not a
+        # veto). It is deliberately NOT a hard conflict because the ICT-MSNR
+        # layer is an INDEPENDENT confirmation system, not a replacement.
+        if (ict_msnr_direction in (BULLISH, BEARISH)
+                and ict_msnr_strength >= 0.5
+                and ict_msnr_direction != direction
+                and direction in (BULLISH, BEARISH)):
+            conflicts.append(
+                f'ICT-MSNR confluence is {ict_msnr_direction} '
+                f'({ict_msnr_strength:.0%} strength), opposing the {direction} setup'
+            )
+
         result = ConfluenceResult(
             direction=direction,
             votes=votes,
@@ -176,12 +208,19 @@ class ConfluenceEngine:
                 f'{direction} by {agreement:.0%} of cast module weight '
                 f'({bullish:.1f} bullish vs {bearish:.1f} bearish)'
             ),
+            ict_msnr_direction=ict_msnr_direction,
+            ict_msnr_strength=round(ict_msnr_strength, 4),
+            ict_msnr_score=round(ict_msnr_score, 4),
+            ict_msnr_conflicts=ict_msnr_conflicts,
+            ict_msnr_explanation=ict_msnr_explanation,
         )
 
         logger.debug(
-            'CONFLUENCE | %s %s -> %s agreement=%.2f conflicts=%d hard=%d',
+            'CONFLUENCE | %s %s -> %s agreement=%.2f conflicts=%d hard=%d '
+            'ict_msnr=%s(%.2f)',
             mtf.symbol, mtf.selected_timeframe, direction,
             agreement, len(conflicts), len(hard),
+            ict_msnr_direction, ict_msnr_strength,
         )
         return result
 

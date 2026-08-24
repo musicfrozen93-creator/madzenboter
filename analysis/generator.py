@@ -27,7 +27,7 @@ from typing import List, Optional
 
 from analysis.confluence import ConfluenceResult
 from analysis.engine import TechnicalPicture
-from analysis.scoring import MIN_TRADEABLE_QUALITY, Score
+from analysis.scoring import MIN_TRADEABLE_CONFIDENCE, MIN_TRADEABLE_QUALITY, Score
 from analysis.structure import BULLISH
 from analysis.timeframes import MultiTimeframePicture
 from v4.params import V4Params
@@ -66,6 +66,7 @@ class TradingSignal:
     take_profits: List[float] = field(default_factory=list)
     risk_reward: Optional[float] = None
     risk_pct: Optional[float] = None
+    rr_per_tp: List[float] = field(default_factory=list)
     target_sources: List[str] = field(default_factory=list)
     entry_basis: Optional[str] = None
     stop_basis: Optional[str] = None
@@ -94,6 +95,7 @@ class SignalGenerator:
         mtf: MultiTimeframePicture,
         confluence: ConfluenceResult,
         quality: Score,
+        confidence: Score,
         price_precision: int = 8,
     ) -> TradingSignal:
         """Produce the signal, or a WAIT carrying the reason it was withheld."""
@@ -130,7 +132,15 @@ class SignalGenerator:
                 f'tradeable floor of {MIN_TRADEABLE_QUALITY}'
             )
 
-        # 4. Levels, all derived from the analysis.
+        # 4. Confidence floor. The engine must be reasonably certain about its own
+        #    reading before it emits a tradeable signal.
+        if confidence.value < MIN_TRADEABLE_CONFIDENCE:
+            return wait(
+                f'engine confidence {confidence.value}/100 ({confidence.grade}) is '
+                f'below the tradeable floor of {MIN_TRADEABLE_CONFIDENCE}'
+            )
+
+        # 5. Levels, all derived from the analysis.
         entry, entry_basis = self._entry(entry_picture, side, price_precision)
         stop, stop_basis = self._stop(entry_picture, side, entry, price_precision)
         if stop is None:
@@ -151,17 +161,27 @@ class SignalGenerator:
                 'TP1/TP2/TP3 ladder'
             )
 
-        final_rr = abs(targets[-1].price - entry) / risk if risk > 0 else 0.0
+        # Per-target reward:risk for transparent evaluation.
+        rr_per_tp = [
+            round(abs(t.price - entry) / risk, 2) if risk > 0 else 0.0
+            for t in targets
+        ]
 
-        # The furthest target must clear the minimum reward:risk. `min_rr_price`
-        # is the exact price that threshold corresponds to.
+        # TP1 must offer a meaningful near-term reward, not just 0.5R.
+        if rr_per_tp[0] < self.params.min_tp1_rr:
+            return wait(
+                f'TP1 reward:risk is {rr_per_tp[0]:.2f}, below the '
+                f'{self.params.min_tp1_rr:.2f} minimum'
+            )
+
+        # The furthest target must clear the overall minimum reward:risk.
         minimum = take_profit_levels(entry, stop, side, self.params)['min_rr_price']
         clears = (
             targets[-1].price >= minimum if side == 'long' else targets[-1].price <= minimum
         )
         if not clears:
             return wait(
-                f'best available reward:risk is {final_rr:.2f}, below the '
+                f'best available reward:risk is {rr_per_tp[-1]:.2f}, below the '
                 f'{self.params.min_rr:.2f} minimum'
             )
 
@@ -170,8 +190,9 @@ class SignalGenerator:
             entry=entry,
             stop_loss=stop,
             take_profits=[t.price for t in targets],
-            risk_reward=round(final_rr, 2),
+            risk_reward=round(rr_per_tp[-1], 2),
             risk_pct=round(risk_pct, 5),
+            rr_per_tp=rr_per_tp,
             target_sources=[t.source for t in targets],
             entry_basis=entry_basis,
             stop_basis=stop_basis,

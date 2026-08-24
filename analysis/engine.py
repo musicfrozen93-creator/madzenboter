@@ -25,6 +25,18 @@ from analysis.cache import RequestScope
 from analysis.elliott import ElliottState, analyze_elliott
 from analysis.fibonacci import FibonacciState, analyze_fibonacci
 from analysis.levels import SupportResistance, detect_levels
+from analysis.ict import (
+    DisplacementEngine,
+    DisplacementResult,
+    ICTMSNRConfluenceEngine,
+    ICTStructureAdapter,
+    ICTStructureResult,
+    IctMsnrConfluence,
+    MSNREngine,
+    MSNRResult,
+    PremiumDiscountEngine,
+    PremiumDiscountResult,
+)
 from analysis.smc import (
     ADXState,
     FairValueGapState,
@@ -134,6 +146,12 @@ class TechnicalPicture:
     macd: MACDState
     adx: ADXState
     patterns: PatternState
+    # ICT + MSNR contextual layers (Phase 2A)
+    msnr: MSNRResult = field(default_factory=MSNRResult)
+    ict_structure: ICTStructureResult = field(default_factory=ICTStructureResult)
+    displacement: DisplacementResult = field(default_factory=DisplacementResult)
+    premium_discount: PremiumDiscountResult = field(default_factory=PremiumDiscountResult)
+    ict_confluence: IctMsnrConfluence = field(default_factory=IctMsnrConfluence)
     quote: Optional[Quote] = None
     benchmark_symbol: Optional[str] = None
     benchmark_regime: BtcRegime = BtcRegime.UNKNOWN
@@ -155,8 +173,9 @@ class TechnicalPicture:
     def trend_direction(self) -> str:
         """The timeframe's directional read: 'bullish' | 'bearish' | 'range'.
 
-        Combines three independent votes — the regime router, the EMA stack, and
-        market structure — so a single noisy input cannot flip the read.
+        Two independent votes — the regime router and the EMA stack. Structure is
+        excluded here because it already contributes its own weighted module vote
+        in the confluence layer; counting it in both places would double-weight it.
         """
         votes: List[str] = []
 
@@ -171,9 +190,6 @@ class TechnicalPicture:
                 votes.append(BULLISH)
             elif ind.ema_fast < ind.ema_slow and ind.price < ind.ema_slow:
                 votes.append(BEARISH)
-
-        if self.structure.trend in (BULLISH, BEARISH):
-            votes.append(self.structure.trend)
 
         bulls = votes.count(BULLISH)
         bears = votes.count(BEARISH)
@@ -190,7 +206,7 @@ class TechnicalPicture:
         if direction == RANGE:
             return 0.0
         agree = 0
-        total = 3
+        total = 2
         if self.regime.direction == (
             Direction.TREND_UP if direction == BULLISH else Direction.TREND_DOWN
         ):
@@ -199,8 +215,6 @@ class TechnicalPicture:
         if direction == BULLISH and ind.ema_fast > ind.ema_slow and ind.price > ind.ema_slow:
             agree += 1
         elif direction == BEARISH and ind.ema_fast < ind.ema_slow and ind.price < ind.ema_slow:
-            agree += 1
-        if self.structure.trend == direction:
             agree += 1
         return agree / total
 
@@ -294,6 +308,42 @@ class AnalysisEngine:
         adx = compute_adx_state(candles)
         patterns = detect_patterns(swings, indicators.price, indicators.atr)
 
+        # ── ICT + MSNR contextual layers (Phase 2A). Pure, reuse existing
+        #    swings, levels, structure — no new market-data fetch, no
+        #    double-counting (evidence_id deduplication). ──
+        msnr_engine = MSNREngine()
+        msnr = msnr_engine.analyze(candles, swings, levels, indicators.price, indicators.atr)
+
+        ict_adapter = ICTStructureAdapter()
+        ict_structure = ict_adapter.interpret(structure)
+
+        disp_engine = DisplacementEngine()
+        displacement = disp_engine.analyze(
+            candles, indicators.atr,
+            structure_event=structure.event,
+            structure_event_direction=structure.event_direction,
+        )
+
+        pd_engine = PremiumDiscountEngine()
+        premium_discount = pd_engine.analyze(swings, indicators.price)
+
+        # The ICT-MSNR confluence evaluates RELATIONSHIPS between the layers.
+        ict_conf_engine = ICTMSNRConfluenceEngine()
+        # trend_direction is computed below via TechnicalPicture property, but
+        # we need it before constructing the picture.  Compute it here from the
+        # same inputs as the property does (regime + EMA).
+        pre_trend = _quick_trend_direction(regime, indicators)
+        ict_confluence = ict_conf_engine.evaluate(
+            msnr=msnr,
+            ict_structure=ict_structure,
+            displacement=displacement,
+            premium_discount=premium_discount,
+            liquidity=liquidity,
+            fvg=fair_value_gaps,
+            order_blocks=order_blocks,
+            existing_trend=pre_trend,
+        )
+
         spread = quote.spread if quote else 0.0
         price = quote.last if quote and quote.last > 0 else indicators.price
         quality_filters = evaluate_market_quality(
@@ -319,6 +369,11 @@ class AnalysisEngine:
             macd=macd,
             adx=adx,
             patterns=patterns,
+            msnr=msnr,
+            ict_structure=ict_structure,
+            displacement=displacement,
+            premium_discount=premium_discount,
+            ict_confluence=ict_confluence,
             quote=quote,
             benchmark_symbol=benchmark_symbol,
             benchmark_regime=benchmark_regime,
@@ -427,6 +482,36 @@ class AnalysisEngine:
         if df is None:
             return BtcRegime.UNKNOWN
         return classify_btc_regime(df, self.settings)
+
+
+def _quick_trend_direction(regime, indicators) -> str:
+    """Mirror TechnicalPicture.trend_direction without building the full object.
+
+    Used by the ICT-MSNR confluence engine to know the existing trend before
+    the TechnicalPicture dataclass is instantiated.
+    """
+    from analysis.structure import BULLISH, BEARISH, RANGE
+    from v4.regime import Direction as D
+
+    votes = []
+    if regime.direction == D.TREND_UP:
+        votes.append(BULLISH)
+    elif regime.direction == D.TREND_DOWN:
+        votes.append(BEARISH)
+
+    if indicators.ema_fast > 0 and indicators.ema_slow > 0:
+        if indicators.ema_fast > indicators.ema_slow and indicators.price > indicators.ema_slow:
+            votes.append(BULLISH)
+        elif indicators.ema_fast < indicators.ema_slow and indicators.price < indicators.ema_slow:
+            votes.append(BEARISH)
+
+    bulls = votes.count(BULLISH)
+    bears = votes.count(BEARISH)
+    if bulls > bears:
+        return BULLISH
+    if bears > bulls:
+        return BEARISH
+    return RANGE
 
 
 def _last(series: pd.Series) -> float:

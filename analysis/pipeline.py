@@ -111,8 +111,10 @@ class SignalPipeline:
 
         precision = self._price_precision(provider, symbol, scope)
         quality = self.quality_scorer.score(mtf, confluence)
-        signal = self.signal_generator.generate(mtf, confluence, quality, precision)
         confidence = self.confidence_scorer.score(mtf, confluence)
+        signal = self.signal_generator.generate(
+            mtf, confluence, quality, confidence, precision,
+        )
         explanation = self.explanation_engine.build(
             signal, mtf, confluence, quality, confidence
         )

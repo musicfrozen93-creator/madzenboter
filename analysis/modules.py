@@ -360,10 +360,15 @@ def _fibonacci_vote(picture: TechnicalPicture) -> ModuleVote:
 
 
 def _volume_vote(picture: TechnicalPicture) -> ModuleVote:
-    """Participation behind the last candle.
+    """Volume-weighted directional read over recent candles.
 
-    Volume has no direction of its own — it confirms whoever moved the candle.
+    A single candle's colour is noisy; instead we weight the last N candles by
+    their volume share and measure the net directional pressure. The result is
+    BULLISH, BEARISH, or NEUTRAL — never a strong directional call on thin or
+    ambiguous evidence.
     """
+    LOOKBACK = 5
+
     ind = picture.indicators
     ratio = ind.volume_ratio
     if ind.volume_average <= 0:
@@ -371,25 +376,62 @@ def _volume_vote(picture: TechnicalPicture) -> ModuleVote:
             VOLUME, NEUTRAL_VOTE, 0.0, 'Unknown', 'no volume history available',
         )
 
-    last = picture.candles.iloc[-1]
-    candle_bullish = float(last['close']) >= float(last['open'])
-    direction = BULLISH if candle_bullish else BEARISH
+    candles = picture.candles
+    if len(candles) < LOOKBACK:
+        return ModuleVote(
+            VOLUME, NEUTRAL_VOTE, 0.1, 'Insufficient',
+            f'only {len(candles)} candles, need {LOOKBACK} for volume analysis',
+        )
+
+    recent = candles.iloc[-LOOKBACK:]
+    total_vol = float(recent['volume'].sum())
+    if total_vol <= 0:
+        return ModuleVote(
+            VOLUME, NEUTRAL_VOTE, 0.0, 'Unknown', 'zero volume in recent candles',
+        )
+
+    bull_vol = 0.0
+    bear_vol = 0.0
+    for _, c in recent.iterrows():
+        v = float(c['volume'])
+        if float(c['close']) >= float(c['open']):
+            bull_vol += v
+        else:
+            bear_vol += v
+
+    bull_share = bull_vol / total_vol
+    bear_share = bear_vol / total_vol
+    imbalance = abs(bull_share - bear_share)
+
+    if imbalance < 0.15:
+        direction = NEUTRAL_VOTE
+    elif bull_share > bear_share:
+        direction = BULLISH
+    else:
+        direction = BEARISH
+
+    if ratio < 0.7:
+        return ModuleVote(
+            VOLUME, NEUTRAL_VOTE, 0.15, 'Weak',
+            f'{ratio:.2f}x avg vol — participation too thin to confirm',
+        )
+
+    if direction == NEUTRAL_VOTE:
+        return ModuleVote(
+            VOLUME, NEUTRAL_VOTE, 0.3, 'Mixed',
+            f'{ratio:.2f}x avg vol, {bull_share:.0%} buy / {bear_share:.0%} sell — no clear side',
+        )
 
     if ratio >= 1.5:
         strength, label = 1.0, 'Strong'
     elif ratio >= 1.0:
         strength, label = 0.7, 'Above average'
-    elif ratio >= 0.7:
-        strength, label = 0.4, 'Average'
     else:
-        # Thin participation confirms nothing at all.
-        return ModuleVote(
-            VOLUME, NEUTRAL_VOTE, 0.15, 'Weak',
-            f'{ratio:.2f}x average volume — participation too thin to confirm',
-        )
+        strength, label = 0.4, 'Average'
 
     return ModuleVote(
-        VOLUME, direction, strength, label, f'{ratio:.2f}x average volume',
+        VOLUME, direction, strength, label,
+        f'{ratio:.2f}x avg vol, {bull_share:.0%} buy / {bear_share:.0%} sell',
     )
 
 

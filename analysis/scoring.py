@@ -57,25 +57,33 @@ QUALITY_BANDS: tuple[tuple[int, str], ...] = (
 # would hide information the user asked for rather than protect them.
 MIN_TRADEABLE_QUALITY = 50
 
+# Minimum confidence for the engine to emit a BUY/SELL signal. Below this the
+# engine is admitting it is too uncertain about its own reading, so the signal
+# is withheld as WAIT. Deliberately lower than the "Low" grading band (40) so
+# only the very bottom of the range is filtered — the user sees a "Low" badge
+# and can judge for themselves, but "Very Low" is suppressed.
+MIN_TRADEABLE_CONFIDENCE = 35
+
 # Credit a module gets when it has no directional opinion. It is not evidence
 # for the trade, but it is not evidence against it either.
 NEUTRAL_CREDIT = 0.5
 
 # ── Confidence component budgets (total 100) ──
-# Phase 2 added the Smart Money agreement components (order block, liquidity,
-# FVG, pattern) and rebalanced the classical components down to fit.
+# Phase 2A added the ICT-MSNR confluence component and rebalanced the
+# existing components down by 1 point each across several entries to fit.
 CONFIDENCE_BUDGET = {
-    'timeframe_agreement': 22,       # higher-timeframe agreement
-    'trend_consistency': 12,         # trend agreement within each timeframe
-    'wave_certainty': 10,
-    'order_block_agreement': 8,
+    'timeframe_agreement': 21,       # higher-timeframe agreement
+    'trend_consistency': 11,         # trend agreement within each timeframe
+    'wave_certainty': 9,
+    'order_block_agreement': 7,
     'liquidity_agreement': 6,
-    'fvg_agreement': 6,
-    'pattern_agreement': 6,
+    'fvg_agreement': 5,
+    'pattern_agreement': 5,
     'volume_confirmation': 6,
     'rsi_confirmation': 6,
     'data_quality': 8,
-    'indicator_agreement': 10,
+    'indicator_agreement': 9,
+    'ict_msnr_agreement': 7,         # Phase 2A: ICT-MSNR contextual confluence
 }
 
 # Which module backs each confidence component. When that module is disabled by
@@ -96,6 +104,7 @@ CONFIDENCE_COMPONENT_MODULE = {
     'rsi_confirmation': RSI,
     'data_quality': None,
     'indicator_agreement': None,
+    'ict_msnr_agreement': None,      # Always present (not tied to one module)
 }
 
 # Penalty per conflict, subtracted from confidence.
@@ -286,6 +295,8 @@ class ConfidenceScorer:
         ))
         built.append(self._data_quality(mtf))
         built.append(self._indicator_agreement(confluence, side))
+        # Phase 2A: ICT-MSNR contextual confluence agreement.
+        built.append(self._ict_msnr_agreement(confluence, side))
 
         # Keep only components whose backing module is enabled (None = always).
         kept = [
@@ -429,6 +440,39 @@ class ConfidenceScorer:
             'indicator_agreement', budget * fraction, budget,
             'Indicator agreement',
             f'{len(agreeing)} of {len(directional)} directional modules agree',
+        )
+
+    def _ict_msnr_agreement(
+        self, confluence: ConfluenceResult, side: str
+    ) -> ScoreComponent:
+        """How well the ICT-MSNR contextual confluence agrees with the trade.
+
+        Full credit when it agrees, partial when neutral, zero when opposing.
+        This is the ONLY way ICT-MSNR evidence contributes to the confidence
+        score — it does not add module weights elsewhere.
+        """
+        budget = CONFIDENCE_BUDGET['ict_msnr_agreement']
+        ict_dir = confluence.ict_msnr_direction
+        ict_strength = confluence.ict_msnr_strength
+        wanted = BULLISH if side == 'long' else BEARISH
+
+        if ict_dir == wanted and ict_strength > 0:
+            return ScoreComponent(
+                'ict_msnr_agreement', budget * ict_strength, budget,
+                'ICT-MSNR agreement',
+                f'ICT-MSNR confluence is {ict_dir} ({ict_strength:.0%} strength) — agrees',
+            )
+        if ict_dir in (BULLISH, BEARISH) and ict_dir != wanted:
+            return ScoreComponent(
+                'ict_msnr_agreement', 0.0, budget,
+                'ICT-MSNR agreement',
+                f'ICT-MSNR confluence is {ict_dir} — opposes the {side} setup',
+            )
+        # Neutral or no direction.
+        return ScoreComponent(
+            'ict_msnr_agreement', budget * 0.3, budget,
+            'ICT-MSNR agreement',
+            confluence.ict_msnr_explanation or 'ICT-MSNR confluence is neutral',
         )
 
     def _conflict_penalty(self, confluence: ConfluenceResult) -> ScoreComponent:

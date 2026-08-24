@@ -12,6 +12,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Optional
 
+from analysis.diagnostic import build_diagnostic
 from analysis.elliott import ElliottState, WaveCount
 from analysis.levels import SupportResistance, Zone
 from analysis.pipeline import AnalysisResult
@@ -21,11 +22,14 @@ from api.schemas import (
     AnalysisDetailModel,
     AnalyzeResponse,
     ConfluenceModel,
+    DisplacementModel,
     ElliottModel,
     FairValueGapModel,
     FibonacciModel,
     GuideStepModel,
     HealthModel,
+    ICTStructureModel,
+    IctMsnrConfluenceModel,
     IndicatorsModel,
     IntelligenceModel,
     InvalidationConditionModel,
@@ -34,12 +38,14 @@ from api.schemas import (
     LifecycleModel,
     LiquidityModel,
     MACDModel,
+    MSNRModel,
     MarketContextModel,
     MarketQualityModel,
     ModuleBreakdownModel,
     NarrativeModel,
     OrderBlockModel,
     PatternModel,
+    PremiumDiscountModel,
     RegimeModel,
     RiskFactorModel,
     RiskModel,
@@ -196,6 +202,73 @@ def _elliott(state: ElliottState) -> ElliottModel:
     )
 
 
+def _msnr(m) -> MSNRModel:
+    return MSNRModel(
+        location=m.location,
+        nearest_support=m.nearest_support,
+        nearest_resistance=m.nearest_resistance,
+        distance_to_support=m.distance_to_support,
+        distance_to_resistance=m.distance_to_resistance,
+        strength=round(m.strength, 4),
+        score=round(m.score, 4),
+        explanation=m.explanation,
+    )
+
+
+def _displacement(d) -> DisplacementModel:
+    return DisplacementModel(
+        direction=d.direction,
+        strength=round(d.strength, 4),
+        has_structure_break=d.has_structure_break,
+        explanation=d.explanation,
+    )
+
+
+def _premium_discount(pd) -> PremiumDiscountModel:
+    return PremiumDiscountModel(
+        zone=pd.zone,
+        range_high=pd.range_high,
+        range_low=pd.range_low,
+        midpoint=pd.midpoint,
+        price_position=round(pd.price_position, 4),
+        explanation=pd.explanation,
+    )
+
+
+def _ict_structure(ict) -> ICTStructureModel:
+    return ICTStructureModel(
+        has_bos=ict.has_bos,
+        bos_direction=ict.bos_direction,
+        has_mss=ict.has_mss,
+        mss_direction=ict.mss_direction,
+        higher_highs=ict.higher_highs,
+        higher_lows=ict.higher_lows,
+        lower_highs=ict.lower_highs,
+        lower_lows=ict.lower_lows,
+        trend=ict.trend,
+        strength=round(ict.strength, 4),
+        explanation=ict.explanation,
+    )
+
+
+def _ict_msnr_confluence(c) -> IctMsnrConfluenceModel:
+    return IctMsnrConfluenceModel(
+        direction=c.direction,
+        strength=round(c.strength, 4),
+        score=round(c.score, 4),
+        bullish_elements=[f'{e.name}: {e.detail}' for e in c.bullish_elements],
+        bearish_elements=[f'{e.name}: {e.detail}' for e in c.bearish_elements],
+        neutral_elements=[f'{e.name}: {e.detail}' for e in c.neutral_elements],
+        conflicts=c.conflicts,
+        primary_reason=c.primary_reason,
+        explanation=c.explanation,
+        primary_blocker=c.primary_blocker,
+        secondary_blockers=c.secondary_blockers,
+        evidence_count=c.evidence_count,
+        deduplicated_count=c.deduplicated_count,
+    )
+
+
 def _intelligence(it) -> IntelligenceModel:
     """Serialize the Phase 3 trade-intelligence layer."""
     return IntelligenceModel(
@@ -304,6 +377,7 @@ def to_analyze_response(result: AnalysisResult) -> AnalyzeResponse:
         tp=list(signal.take_profits),
         risk_reward=signal.risk_reward,
         risk_pct=signal.risk_pct,
+        rr_per_tp=list(signal.rr_per_tp),
 
         headline=result.explanation.headline,
         reasons=result.explanation.all_reasons,
@@ -376,6 +450,9 @@ def to_analyze_response(result: AnalysisResult) -> AnalyzeResponse:
                 conflicts=confluence.conflicts,
                 hard_conflicts=confluence.hard_conflicts,
                 reason=confluence.reason,
+                ict_msnr_direction=confluence.ict_msnr_direction,
+                ict_msnr_strength=confluence.ict_msnr_strength,
+                ict_msnr_score=confluence.ict_msnr_score,
             ),
             order_blocks=_order_blocks(picture.order_blocks),
             fair_value_gaps=_fair_value_gaps(picture.fair_value_gaps),
@@ -384,6 +461,11 @@ def to_analyze_response(result: AnalysisResult) -> AnalyzeResponse:
             macd=_macd(picture.macd),
             adx=_adx(picture.adx),
             patterns=_patterns(picture.patterns),
+            msnr=_msnr(picture.msnr),
+            displacement=_displacement(picture.displacement),
+            premium_discount=_premium_discount(picture.premium_discount),
+            ict_structure=_ict_structure(picture.ict_structure),
+            ict_msnr_confluence=_ict_msnr_confluence(picture.ict_confluence),
             market_quality=[
                 MarketQualityModel(name=f.name, passed=f.passed, detail=f.detail)
                 for f in picture.quality_filters
@@ -405,6 +487,16 @@ def to_analyze_response(result: AnalysisResult) -> AnalyzeResponse:
         confidence_detail=_score_detail(result.confidence),
         intelligence=_intelligence(result.intelligence),
 
+        diagnostic=_diagnostic(result),
+
         generated_at=datetime.now(timezone.utc).isoformat(),
         elapsed_ms=result.elapsed_ms,
     )
+
+
+def _diagnostic(result: AnalysisResult) -> dict:
+    """Build the diagnostic breakdown dict for the API response."""
+    diag = build_diagnostic(
+        result.signal, result.confluence, result.quality, result.confidence,
+    )
+    return diag.as_dict()

@@ -25,6 +25,7 @@ from sqlalchemy import (
     ForeignKey,
     Integer,
     String,
+    Text,
     func,
 )
 from sqlalchemy.orm import DeclarativeBase, relationship
@@ -123,3 +124,40 @@ class SignalModel(Base):
 
     def __repr__(self) -> str:
         return f'<Signal id={self.id} {self.side} {self.symbol} str={self.strength:.2f}>'
+
+
+# ─────────────────────────────────────────────
+# Signal Outcome Tracking (Phase 1 F7)
+# ─────────────────────────────────────────────
+
+class SignalOutcomeModel(Base):
+    """Tracks the lifecycle of every actionable signal the engine emits."""
+    __tablename__ = 'signal_outcomes'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    symbol = Column(String(50), nullable=False, index=True)
+    timeframe = Column(String(10), nullable=False)
+    market = Column(String(20), nullable=False)
+    provider = Column(String(30), nullable=False)
+    direction = Column(String(4), nullable=False)
+    entry = Column(Float, nullable=False)
+    stop_loss = Column(Float, nullable=False)
+    tp1 = Column(Float, nullable=False)
+    tp2 = Column(Float, nullable=False)
+    tp3 = Column(Float, nullable=False)
+    risk_reward = Column(Float, nullable=False)
+    quality = Column(Integer, nullable=False)
+    confidence = Column(Integer, nullable=False)
+    snapshot = Column(Text, nullable=False)
+    status = Column(
+        String(20), nullable=False, default='OPEN', index=True,
+    )
+    opened_at = Column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    closed_at = Column(DateTime(timezone=True), nullable=True)
+    close_price = Column(Float, nullable=True)
+    pnl_r = Column(Float, nullable=True)
+
+    def __repr__(self) -> str:
+        return f'<SignalOutcome id={self.id} {self.direction} {self.symbol} status={self.status}>'

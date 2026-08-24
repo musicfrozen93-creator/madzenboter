@@ -272,6 +272,75 @@ class PatternModel(BaseModel):
     reason: str = ''
 
 
+# ── ICT + MSNR contextual models (Phase 2A, additive) ──
+
+class MSNRModel(BaseModel):
+    """MSNR location context."""
+
+    location: str = 'UNAVAILABLE'     # SUPPORT_ZONE | RESISTANCE_ZONE | MID_RANGE | NO_CLEAR_LEVEL | UNAVAILABLE
+    nearest_support: Optional[float] = None
+    nearest_resistance: Optional[float] = None
+    distance_to_support: Optional[float] = None
+    distance_to_resistance: Optional[float] = None
+    strength: float = 0.0
+    score: float = 0.0
+    explanation: str = ''
+
+
+class DisplacementModel(BaseModel):
+    """Displacement detection."""
+
+    direction: str = 'UNAVAILABLE'    # BULLISH | BEARISH | NEUTRAL | UNAVAILABLE
+    strength: float = 0.0
+    has_structure_break: bool = False
+    explanation: str = ''
+
+
+class PremiumDiscountModel(BaseModel):
+    """Premium / Discount zone."""
+
+    zone: str = 'UNAVAILABLE'         # PREMIUM | EQUILIBRIUM | DISCOUNT | UNAVAILABLE
+    range_high: Optional[float] = None
+    range_low: Optional[float] = None
+    midpoint: Optional[float] = None
+    price_position: float = 0.5
+    explanation: str = ''
+
+
+class ICTStructureModel(BaseModel):
+    """ICT interpretation of market structure."""
+
+    has_bos: bool = False
+    bos_direction: Optional[str] = None
+    has_mss: bool = False
+    mss_direction: Optional[str] = None
+    higher_highs: bool = False
+    higher_lows: bool = False
+    lower_highs: bool = False
+    lower_lows: bool = False
+    trend: str = 'range'
+    strength: float = 0.0
+    explanation: str = ''
+
+
+class IctMsnrConfluenceModel(BaseModel):
+    """ICT-MSNR relationship-based confluence."""
+
+    direction: str = 'range'
+    strength: float = 0.0
+    score: float = 0.0
+    bullish_elements: List[str] = Field(default_factory=list)
+    bearish_elements: List[str] = Field(default_factory=list)
+    neutral_elements: List[str] = Field(default_factory=list)
+    conflicts: List[str] = Field(default_factory=list)
+    primary_reason: str = ''
+    explanation: str = ''
+    primary_blocker: Optional[str] = None
+    secondary_blockers: List[str] = Field(default_factory=list)
+    evidence_count: int = 0
+    deduplicated_count: int = 0
+
+
 class MarketQualityModel(BaseModel):
     """One market-quality check."""
 
@@ -321,6 +390,10 @@ class ConfluenceModel(BaseModel):
     conflicts: List[str] = Field(default_factory=list)
     hard_conflicts: List[str] = Field(default_factory=list)
     reason: str
+    # Phase 2A: ICT-MSNR contextual confluence summary.
+    ict_msnr_direction: str = 'range'
+    ict_msnr_strength: float = 0.0
+    ict_msnr_score: float = 0.0
 
 
 class AnalysisDetailModel(BaseModel):
@@ -351,6 +424,12 @@ class AnalysisDetailModel(BaseModel):
     macd: MACDModel = Field(default_factory=MACDModel)
     adx: ADXTrendModel = Field(default_factory=ADXTrendModel)
     patterns: PatternModel = Field(default_factory=PatternModel)
+    # ICT + MSNR contextual layers (Phase 2A, additive).
+    msnr: MSNRModel = Field(default_factory=MSNRModel)
+    displacement: DisplacementModel = Field(default_factory=DisplacementModel)
+    premium_discount: PremiumDiscountModel = Field(default_factory=PremiumDiscountModel)
+    ict_structure: ICTStructureModel = Field(default_factory=ICTStructureModel)
+    ict_msnr_confluence: IctMsnrConfluenceModel = Field(default_factory=IctMsnrConfluenceModel)
     market_quality: List[MarketQualityModel] = Field(default_factory=list)
     market_conditions_clean: bool = True
     context: MarketContextModel
@@ -502,6 +581,10 @@ class AnalyzeResponse(BaseModel):
     )
     risk_reward: Optional[float] = None
     risk_pct: Optional[float] = None
+    rr_per_tp: List[float] = Field(
+        default_factory=list,
+        description='Per-target R:R (TP1, TP2, TP3) — empty when WAIT.',
+    )
 
     headline: str
     reasons: List[str] = Field(
@@ -525,6 +608,11 @@ class AnalyzeResponse(BaseModel):
     confidence_detail: ScoreDetailModel
     # Phase 3 — the trade-intelligence review (additive; never alters the signal).
     intelligence: IntelligenceModel
+
+    diagnostic: Optional[Dict] = Field(
+        default=None,
+        description='Full diagnostic breakdown: modules, gates, reasoning.',
+    )
 
     generated_at: str = Field(description='UTC ISO-8601 timestamp.')
     elapsed_ms: int = 0

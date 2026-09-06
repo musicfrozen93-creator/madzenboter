@@ -24,6 +24,7 @@ from analysis.confluence import ConfluenceResult
 from analysis.modules import (
     ELLIOTT,
     FVG,
+    ICT_CONFLUENCE,
     LIQUIDITY,
     MODULE_ORDER,
     MODULE_WEIGHTS,
@@ -104,7 +105,7 @@ CONFIDENCE_COMPONENT_MODULE = {
     'rsi_confirmation': RSI,
     'data_quality': None,
     'indicator_agreement': None,
-    'ict_msnr_agreement': None,      # Always present (not tied to one module)
+    'ict_msnr_agreement': ICT_CONFLUENCE,  # Dropped when ICT confluence is off
 }
 
 # Penalty per conflict, subtracted from confidence.

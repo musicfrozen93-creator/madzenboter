@@ -73,6 +73,56 @@ MODULE_ORDER: tuple[str, ...] = (
     ORDER_BLOCK, FVG, LIQUIDITY, VWAP, MACD, ADX, PATTERN,
 )
 
+# ── ICT contextual modules (Phase 2A UI toggles) ──
+# These are NOT weighted-vote modules — they never enter MODULE_WEIGHTS and never
+# contribute a numerator/denominator to the Quality Score.  They are user-facing
+# toggles that gate which ICT evidence is INCLUDED in the ICT-MSNR confluence
+# panel and — via the ict_confluence toggle — whether that confluence feeds the
+# confidence bonus at all.  Where the same underlying calculation already lives
+# under the classical Smart Money modules (FVG, Order Blocks, Liquidity), the
+# engine REUSES that calculation instead of computing it twice — see the
+# evidence-registry deduplication in analysis.ict.ict_confluence.
+ICT_LIQUIDITY = 'ict_liquidity'
+ICT_LIQUIDITY_SWEEPS = 'ict_liquidity_sweeps'
+ICT_MSS = 'ict_mss'
+ICT_BOS = 'ict_bos'
+ICT_DISPLACEMENT = 'ict_displacement'
+ICT_FVG = 'ict_fvg'
+ICT_ORDER_BLOCKS = 'ict_order_blocks'
+ICT_PREMIUM_DISCOUNT = 'ict_premium_discount'
+ICT_CONFLUENCE = 'ict_confluence'
+
+ICT_MODULES: tuple[str, ...] = (
+    ICT_LIQUIDITY, ICT_LIQUIDITY_SWEEPS, ICT_MSS, ICT_BOS,
+    ICT_DISPLACEMENT, ICT_FVG, ICT_ORDER_BLOCKS, ICT_PREMIUM_DISCOUNT,
+    ICT_CONFLUENCE,
+)
+
+# ── MSNR contextual modules (Phase 2A UI toggles) ──
+# Same contract as ICT_MODULES: contextual only, weight zero, exposed in the
+# UI so the user can turn any component off.  Support/resistance zones share
+# the underlying levels engine with SUPPORT_RESISTANCE — the shared evidence
+# is deduplicated so a level is never counted twice across the two views.
+MSNR_SUPPORT_ZONES = 'msnr_support_zones'
+MSNR_RESISTANCE_ZONES = 'msnr_resistance_zones'
+MSNR_PDHL = 'msnr_pdhl'
+MSNR_PWHL = 'msnr_pwhl'
+MSNR_SWING_LEVELS = 'msnr_swing_levels'
+MSNR_KEY_SR = 'msnr_key_sr'
+MSNR_LOCATION = 'msnr_location'
+
+MSNR_MODULES: tuple[str, ...] = (
+    MSNR_SUPPORT_ZONES, MSNR_RESISTANCE_ZONES, MSNR_PDHL, MSNR_PWHL,
+    MSNR_SWING_LEVELS, MSNR_KEY_SR, MSNR_LOCATION,
+)
+
+CONTEXTUAL_MODULES: tuple[str, ...] = ICT_MODULES + MSNR_MODULES
+
+# Every selectable module (weighted vote + contextual), in the exact order the
+# UI displays them.  This is what the user sees and what resolve_enabled_modules
+# validates against.
+ALL_MODULE_KEYS: tuple[str, ...] = MODULE_ORDER + CONTEXTUAL_MODULES
+
 # Modules that measure market CONTEXT/STRENGTH rather than direction. In the
 # Quality Score they always earn their weight scaled by suitability, never
 # zeroed for "opposing", because they have no side to oppose with.
@@ -90,6 +140,10 @@ STRENGTH_MODULES: frozenset = frozenset({ATR, ADX})
 # normalisation.
 REQUIRED_MODULES: frozenset = frozenset({TREND, STRUCTURE})
 OPTIONAL_MODULES: frozenset = frozenset(MODULE_ORDER) - REQUIRED_MODULES
+# Optional keys the UI may toggle. Includes the contextual ICT/MSNR keys so the
+# request-side resolver accepts them, even though they carry weight zero and
+# never enter MODULE_WEIGHTS.
+OPTIONAL_UI_KEYS: frozenset = OPTIONAL_MODULES | frozenset(CONTEXTUAL_MODULES)
 
 # Human-facing registry, surfaced to the dashboard so the UI never hardcodes a
 # second indicator list. category groups the checkboxes; required==True renders
@@ -110,6 +164,24 @@ MODULE_CATEGORY: Dict[str, str] = {
     ORDER_BLOCK: 'Smart Money',
     FVG: 'Smart Money',
     LIQUIDITY: 'Smart Money',
+    # ICT
+    ICT_LIQUIDITY: 'ICT',
+    ICT_LIQUIDITY_SWEEPS: 'ICT',
+    ICT_MSS: 'ICT',
+    ICT_BOS: 'ICT',
+    ICT_DISPLACEMENT: 'ICT',
+    ICT_FVG: 'ICT',
+    ICT_ORDER_BLOCKS: 'ICT',
+    ICT_PREMIUM_DISCOUNT: 'ICT',
+    ICT_CONFLUENCE: 'ICT',
+    # MSNR
+    MSNR_SUPPORT_ZONES: 'MSNR',
+    MSNR_RESISTANCE_ZONES: 'MSNR',
+    MSNR_PDHL: 'MSNR',
+    MSNR_PWHL: 'MSNR',
+    MSNR_SWING_LEVELS: 'MSNR',
+    MSNR_KEY_SR: 'MSNR',
+    MSNR_LOCATION: 'MSNR',
 }
 
 MODULE_LABEL: Dict[str, str] = {
@@ -128,6 +200,24 @@ MODULE_LABEL: Dict[str, str] = {
     MACD: 'MACD',
     ADX: 'ADX (Trend Strength)',
     PATTERN: 'Chart Patterns',
+    # ICT
+    ICT_LIQUIDITY: 'Liquidity Analysis',
+    ICT_LIQUIDITY_SWEEPS: 'Liquidity Sweeps',
+    ICT_MSS: 'Market Structure Shift (MSS)',
+    ICT_BOS: 'Break of Structure (BOS)',
+    ICT_DISPLACEMENT: 'Displacement',
+    ICT_FVG: 'Fair Value Gaps (FVG)',
+    ICT_ORDER_BLOCKS: 'Order Blocks',
+    ICT_PREMIUM_DISCOUNT: 'Premium / Discount',
+    ICT_CONFLUENCE: 'ICT Confluence',
+    # MSNR
+    MSNR_SUPPORT_ZONES: 'Support Zones',
+    MSNR_RESISTANCE_ZONES: 'Resistance Zones',
+    MSNR_PDHL: 'Previous Day High / Low',
+    MSNR_PWHL: 'Previous Week High / Low',
+    MSNR_SWING_LEVELS: 'Swing Levels',
+    MSNR_KEY_SR: 'Key S/R Zones',
+    MSNR_LOCATION: 'MSNR Location Analysis',
 }
 
 
@@ -137,16 +227,22 @@ def describe_modules() -> List[dict]:
     The single source of truth for which indicators exist, their weight, their
     category, and whether they are required. The frontend renders this list; it
     never invents indicators of its own.
+
+    Includes both weighted-vote modules (MODULE_ORDER) and the contextual
+    ICT/MSNR toggles (CONTEXTUAL_MODULES).  Contextual toggles have weight zero
+    — they do not contribute to the Quality Score denominator; disabling them
+    just excludes their evidence from the ICT / MSNR panels and the confluence
+    bonus, never as points for or against the setup.
     """
     return [
         {
             'key': key,
             'label': MODULE_LABEL.get(key, key),
             'category': MODULE_CATEGORY.get(key, 'Other'),
-            'weight': MODULE_WEIGHTS[key],
+            'weight': MODULE_WEIGHTS.get(key, 0),
             'required': key in REQUIRED_MODULES,
         }
-        for key in MODULE_ORDER
+        for key in ALL_MODULE_KEYS
     ]
 
 
@@ -156,17 +252,40 @@ def resolve_enabled_modules(requested) -> frozenset:
     Rules (see REQUIRED_MODULES for the rationale):
       * ``None`` → every module (the default, fully backward-compatible).
       * Otherwise → the REQUIRED modules are always forced on, plus whichever
-        OPTIONAL modules were requested. Unknown/misspelled names are ignored
-        (never trusted, never able to name arbitrary internals).
+        OPTIONAL modules were requested (including any ICT/MSNR contextual
+        toggles). Unknown/misspelled names are ignored (never trusted, never
+        able to name arbitrary internals).
 
     Returns:
         A frozenset of valid module keys, always a superset of REQUIRED_MODULES.
+        May contain both weighted MODULE_ORDER keys and contextual
+        CONTEXTUAL_MODULES keys.
     """
     if requested is None:
-        return frozenset(MODULE_ORDER)
+        return frozenset(ALL_MODULE_KEYS)
     requested_set = {str(m).strip().lower() for m in requested if str(m).strip()}
-    chosen_optional = requested_set & OPTIONAL_MODULES
+    chosen_optional = requested_set & OPTIONAL_UI_KEYS
     return frozenset(REQUIRED_MODULES | chosen_optional)
+
+
+def ict_enabled(active: frozenset) -> bool:
+    """True when at least one ICT toggle is on.
+
+    Used by the analysis engine to skip ICT evidence computation and by the
+    serializer to omit the ICT panel from the response so a disabled category
+    never appears as active evidence.
+    """
+    return bool(active & frozenset(ICT_MODULES))
+
+
+def msnr_enabled(active: frozenset) -> bool:
+    """True when at least one MSNR toggle is on.
+
+    Mirrors ``ict_enabled`` for MSNR — when every MSNR toggle is off the engine
+    skips the MSNR calculation entirely and no MSNR data appears in the
+    response.
+    """
+    return bool(active & frozenset(MSNR_MODULES))
 
 
 assert sum(MODULE_WEIGHTS.values()) == 100, 'module weights must total 100'

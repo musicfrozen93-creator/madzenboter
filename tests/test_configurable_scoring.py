@@ -23,6 +23,7 @@ from analysis.cache import CANDLE_CACHE
 from analysis.confluence import ConfluenceEngine, ConfluenceResult
 from analysis.engine import AnalysisEngine
 from analysis.modules import (
+    ALL_MODULE_KEYS,
     MODULE_ORDER,
     MODULE_WEIGHTS,
     OPTIONAL_MODULES,
@@ -62,7 +63,12 @@ def _all_bullish_votes():
 # ── resolve_enabled_modules ───────────────────────────────
 
 def test_none_selects_every_module():
-    assert resolve_enabled_modules(None) == frozenset(MODULE_ORDER)
+    # Default = every module, weighted-vote AND contextual (ICT/MSNR toggles).
+    # Contextual toggles carry weight zero so this remains a superset of the
+    # classical MODULE_ORDER but adds no scoring surface.
+    resolved = resolve_enabled_modules(None)
+    assert resolved == frozenset(ALL_MODULE_KEYS)
+    assert frozenset(MODULE_ORDER) <= resolved
 
 
 def test_required_modules_are_always_forced_on():

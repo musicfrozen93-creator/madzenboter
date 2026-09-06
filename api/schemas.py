@@ -609,6 +609,40 @@ class AnalyzeResponse(BaseModel):
     # Phase 3 — the trade-intelligence review (additive; never alters the signal).
     intelligence: IntelligenceModel
 
+    # ── Phase 2A: top-level ICT / MSNR panels ──
+    # These mirror the shapes the frontend ICTAnalysis / MSNRAnalysis /
+    # ICTMSNRConfluence components consume. They are populated only when the
+    # user has at least one toggle in the corresponding category enabled — a
+    # fully-disabled category is omitted (null) so it never appears as active
+    # evidence anywhere in the UI. See analysis.modules.ict_enabled /
+    # msnr_enabled for the gating rule.
+    ict_analysis: Optional[Dict] = Field(
+        default=None,
+        description=(
+            'ICT panel data: liquidity, liquidity_sweeps, mss, bos, '
+            'displacement, fvg, order_blocks, premium_discount, bias, '
+            'confluence_score, confluence_total, diagnostics. Null when every '
+            'ICT toggle is off.'
+        ),
+    )
+    msnr_analysis: Optional[Dict] = Field(
+        default=None,
+        description=(
+            'MSNR panel data: nearest_support, nearest_resistance, '
+            'current_location, support_strength, resistance_strength, '
+            'pdh, pdl, pwh, pwl, swing_levels, key_sr_zones, bias, '
+            'location_quality, diagnostics. Null when every MSNR toggle is off.'
+        ),
+    )
+    ict_confluence: Optional[Dict] = Field(
+        default=None,
+        description=(
+            'Combined ICT+MSNR final confluence: direction, strength, '
+            'bullish/bearish evidence lines, blockers. Null when ICT '
+            'confluence is disabled.'
+        ),
+    )
+
     diagnostic: Optional[Dict] = Field(
         default=None,
         description='Full diagnostic breakdown: modules, gates, reasoning.',

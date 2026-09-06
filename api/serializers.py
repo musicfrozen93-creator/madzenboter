@@ -15,6 +15,26 @@ from typing import Optional
 from analysis.diagnostic import build_diagnostic
 from analysis.elliott import ElliottState, WaveCount
 from analysis.levels import SupportResistance, Zone
+from analysis.modules import (
+    ICT_BOS,
+    ICT_CONFLUENCE,
+    ICT_DISPLACEMENT,
+    ICT_FVG,
+    ICT_LIQUIDITY,
+    ICT_LIQUIDITY_SWEEPS,
+    ICT_MSS,
+    ICT_ORDER_BLOCKS,
+    ICT_PREMIUM_DISCOUNT,
+    MSNR_KEY_SR,
+    MSNR_LOCATION,
+    MSNR_PDHL,
+    MSNR_PWHL,
+    MSNR_RESISTANCE_ZONES,
+    MSNR_SUPPORT_ZONES,
+    MSNR_SWING_LEVELS,
+    ict_enabled,
+    msnr_enabled,
+)
 from analysis.pipeline import AnalysisResult
 from analysis.scoring import Score
 from api.schemas import (
@@ -333,6 +353,358 @@ def _intelligence(it) -> IntelligenceModel:
     )
 
 
+def _bias_from_direction(direction: str) -> str:
+    """Map an internal direction to the frontend's bias string."""
+    d = (direction or '').lower()
+    if d == 'bullish':
+        return 'bullish'
+    if d == 'bearish':
+        return 'bearish'
+    return 'neutral'
+
+
+def _strength_bucket(strength: float) -> str:
+    """Bucket a 0–1 strength into the strong/moderate/weak labels the UI uses."""
+    if strength >= 0.65:
+        return 'strong'
+    if strength >= 0.35:
+        return 'moderate'
+    return 'weak'
+
+
+def _pass(flag: bool) -> str:
+    return 'PASS' if flag else 'FAIL'
+
+
+def _build_ict_analysis(picture, enabled: frozenset) -> Optional[dict]:
+    """Build the top-level `ict_analysis` panel the frontend renders.
+
+    Every ICT toggle that is OFF is omitted from the block so a disabled
+    module never shows as active evidence. When every ICT toggle is off the
+    entire panel is returned as None and the UI drops the panel.
+    """
+    if not ict_enabled(enabled):
+        return None
+
+    liq = picture.liquidity
+    fvg = picture.fair_value_gaps
+    ob = picture.order_blocks
+    ict_struct = picture.ict_structure
+    disp = picture.displacement
+    pd_res = picture.premium_discount
+    conf = picture.ict_confluence
+
+    sweep = liq.last_sweep
+
+    liquidity = None
+    if ICT_LIQUIDITY in enabled:
+        liquidity = {
+            'direction': liq.direction,
+            'detected': liq.direction in ('bullish', 'bearish'),
+            'passed': liq.direction in ('bullish', 'bearish'),
+            'label': liq.reason,
+        }
+
+    liquidity_sweeps = None
+    if ICT_LIQUIDITY_SWEEPS in enabled:
+        liquidity_sweeps = {
+            'detected': sweep is not None,
+            'passed': sweep is not None,
+            'side': sweep.side if sweep else None,
+            'grabbed': bool(sweep.grabbed) if sweep else False,
+            'label': (
+                f"{sweep.side.replace('_', '-')} liquidity swept" if sweep
+                else 'no recent sweep'
+            ),
+        }
+
+    mss = None
+    if ICT_MSS in enabled:
+        mss = {
+            'detected': ict_struct.has_mss,
+            'passed': ict_struct.has_mss,
+            'direction': ict_struct.mss_direction,
+            'label': (
+                f"{(ict_struct.mss_direction or '').title()} MSS"
+                if ict_struct.has_mss else 'no MSS'
+            ),
+        }
+
+    bos = None
+    if ICT_BOS in enabled:
+        bos = {
+            'detected': ict_struct.has_bos,
+            'passed': ict_struct.has_bos,
+            'direction': ict_struct.bos_direction,
+            'label': (
+                f"{(ict_struct.bos_direction or '').title()} BOS"
+                if ict_struct.has_bos else 'no BOS'
+            ),
+        }
+
+    displacement = None
+    if ICT_DISPLACEMENT in enabled:
+        d_active = disp.direction in ('bullish', 'BULLISH', 'bearish', 'BEARISH')
+        displacement = {
+            'detected': d_active,
+            'passed': d_active,
+            'direction': disp.direction.lower() if disp.direction else None,
+            'strength': round(disp.strength, 3),
+            'label': disp.explanation,
+        }
+
+    fvg_block = None
+    if ICT_FVG in enabled:
+        fvg_block = {
+            'detected': fvg.nearest is not None,
+            'passed': fvg.direction in ('bullish', 'bearish'),
+            'direction': fvg.direction,
+            'count': fvg.unfilled_count if hasattr(fvg, 'unfilled_count') else len(fvg.unfilled),
+            'label': fvg.reason,
+        }
+
+    order_blocks_block = None
+    if ICT_ORDER_BLOCKS in enabled:
+        order_blocks_block = {
+            'detected': ob.nearest is not None,
+            'passed': ob.direction in ('bullish', 'bearish'),
+            'direction': ob.direction,
+            'label': ob.reason,
+        }
+
+    premium_discount = None
+    if ICT_PREMIUM_DISCOUNT in enabled:
+        zone = (pd_res.zone or '').lower()
+        premium_discount = {
+            'passed': zone in ('premium', 'discount'),
+            'zone': zone if zone in ('premium', 'discount', 'equilibrium') else None,
+            'level': round(pd_res.price_position, 4),
+            'label': pd_res.explanation,
+        }
+
+    rows = [r for r in (
+        liquidity_sweeps, liquidity, mss, bos, displacement,
+        fvg_block, order_blocks_block, premium_discount,
+    ) if r is not None]
+    pass_count = sum(1 for r in rows if r.get('passed'))
+
+    # Diagnostics — one PASS/FAIL line per enabled ICT toggle.
+    diagnostics = []
+    for label, block in (
+        ('Liquidity', liquidity),
+        ('Liquidity Sweep', liquidity_sweeps),
+        ('MSS', mss),
+        ('BOS', bos),
+        ('Displacement', displacement),
+        ('FVG', fvg_block),
+        ('Order Block', order_blocks_block),
+        ('Premium/Discount', premium_discount),
+    ):
+        if block is None:
+            continue
+        diagnostics.append({
+            'key': label.lower().replace(' ', '_').replace('/', '_'),
+            'label': label,
+            'passed': bool(block.get('passed')),
+            'status': _pass(bool(block.get('passed'))),
+        })
+
+    bias = _bias_from_direction(conf.direction) if ICT_CONFLUENCE in enabled else 'neutral'
+
+    return {
+        'liquidity': liquidity,
+        'liquidity_sweeps': liquidity_sweeps,
+        'mss': mss,
+        'bos': bos,
+        'displacement': displacement,
+        'fvg': fvg_block,
+        'order_blocks': order_blocks_block,
+        'premium_discount': premium_discount,
+        'bias': bias,
+        'confluence_score': pass_count,
+        'confluence_total': len(rows),
+        'diagnostics': diagnostics,
+    }
+
+
+def _build_msnr_analysis(picture, enabled: frozenset) -> Optional[dict]:
+    """Build the top-level `msnr_analysis` panel the frontend renders.
+
+    Same rule as ICT: any MSNR toggle that is OFF is omitted from the block
+    (its key is set to None or the list stays empty), and when the entire
+    category is off the whole panel is None.
+    """
+    if not msnr_enabled(enabled):
+        return None
+
+    m = picture.msnr
+    levels = picture.levels
+
+    nearest_support = (
+        m.nearest_support if MSNR_SUPPORT_ZONES in enabled else None
+    )
+    nearest_resistance = (
+        m.nearest_resistance if MSNR_RESISTANCE_ZONES in enabled else None
+    )
+    support_strength = (
+        _strength_bucket(levels.nearest_support.strength)
+        if (MSNR_SUPPORT_ZONES in enabled and levels.nearest_support) else None
+    )
+    resistance_strength = (
+        _strength_bucket(levels.nearest_resistance.strength)
+        if (MSNR_RESISTANCE_ZONES in enabled and levels.nearest_resistance) else None
+    )
+
+    # Location classification only appears when the location toggle is on.
+    if MSNR_LOCATION in enabled:
+        current_location = (m.location or '').lower()
+    else:
+        current_location = None
+
+    # PDH/PDL and PWH/PWL come from the MSNR engine's periodic_levels list.
+    pdh = pdl = pwh = pwl = None
+    for p in m.periodic_levels:
+        if p.label == 'PDH' and MSNR_PDHL in enabled:
+            pdh = p.price
+        elif p.label == 'PDL' and MSNR_PDHL in enabled:
+            pdl = p.price
+        elif p.label == 'PWH' and MSNR_PWHL in enabled:
+            pwh = p.price
+        elif p.label == 'PWL' and MSNR_PWHL in enabled:
+            pwl = p.price
+
+    swing_levels = []
+    if MSNR_SWING_LEVELS in enabled:
+        for price in m.important_swing_highs[:5]:
+            swing_levels.append({'type': 'swing_high', 'price': price})
+        for price in m.important_swing_lows[:5]:
+            swing_levels.append({'type': 'swing_low', 'price': price})
+
+    key_sr_zones = []
+    if MSNR_KEY_SR in enabled:
+        for price in m.repeated_levels[:6]:
+            key_sr_zones.append({'type': 'zone', 'price': price, 'strength': 'strong'})
+
+    # Bias derived from location — only when location toggle is enabled.
+    bias = 'neutral'
+    if MSNR_LOCATION in enabled:
+        loc = (m.location or '').upper()
+        if loc == 'SUPPORT_ZONE':
+            bias = 'bullish'
+        elif loc == 'RESISTANCE_ZONE':
+            bias = 'bearish'
+
+    if MSNR_LOCATION in enabled:
+        if m.strength >= 0.65:
+            location_quality = 'high'
+        elif m.strength >= 0.35:
+            location_quality = 'medium'
+        else:
+            location_quality = 'low'
+    else:
+        location_quality = None
+
+    diagnostics = []
+    if MSNR_SUPPORT_ZONES in enabled:
+        diagnostics.append({
+            'key': 'support_zones', 'label': 'Support Zones',
+            'passed': nearest_support is not None,
+            'status': _pass(nearest_support is not None),
+        })
+    if MSNR_RESISTANCE_ZONES in enabled:
+        diagnostics.append({
+            'key': 'resistance_zones', 'label': 'Resistance Zones',
+            'passed': nearest_resistance is not None,
+            'status': _pass(nearest_resistance is not None),
+        })
+    if MSNR_PDHL in enabled:
+        diagnostics.append({
+            'key': 'pdhl', 'label': 'Previous Day H/L',
+            'passed': pdh is not None or pdl is not None,
+            'status': _pass(pdh is not None or pdl is not None),
+        })
+    if MSNR_PWHL in enabled:
+        diagnostics.append({
+            'key': 'pwhl', 'label': 'Previous Week H/L',
+            'passed': pwh is not None or pwl is not None,
+            'status': _pass(pwh is not None or pwl is not None),
+        })
+    if MSNR_SWING_LEVELS in enabled:
+        diagnostics.append({
+            'key': 'swing_levels', 'label': 'Swing Levels',
+            'passed': bool(swing_levels),
+            'status': _pass(bool(swing_levels)),
+        })
+    if MSNR_KEY_SR in enabled:
+        diagnostics.append({
+            'key': 'key_sr', 'label': 'Key S/R Zones',
+            'passed': bool(key_sr_zones),
+            'status': _pass(bool(key_sr_zones)),
+        })
+    if MSNR_LOCATION in enabled:
+        diagnostics.append({
+            'key': 'location', 'label': 'Location',
+            'passed': (m.location or '').upper() in ('SUPPORT_ZONE', 'RESISTANCE_ZONE'),
+            'status': _pass(
+                (m.location or '').upper() in ('SUPPORT_ZONE', 'RESISTANCE_ZONE')
+            ),
+        })
+
+    return {
+        'nearest_support': nearest_support,
+        'nearest_resistance': nearest_resistance,
+        'current_location': current_location,
+        'support_strength': support_strength,
+        'resistance_strength': resistance_strength,
+        'pdh': pdh, 'pdl': pdl, 'pwh': pwh, 'pwl': pwl,
+        'swing_levels': swing_levels,
+        'key_sr_zones': key_sr_zones,
+        'bias': bias,
+        'location_quality': location_quality,
+        'diagnostics': diagnostics,
+    }
+
+
+def _build_ict_confluence_panel(picture, enabled: frozenset) -> Optional[dict]:
+    """Build the final ICT+MSNR confluence panel.
+
+    Present only when the ict_confluence toggle is on — otherwise the panel is
+    null so nothing about the confluence appears anywhere in the response.
+    """
+    if ICT_CONFLUENCE not in enabled:
+        return None
+
+    conf = picture.ict_confluence
+    direction = (conf.direction or 'range').lower()
+    if direction == 'range':
+        strength_label = 'weak'
+    else:
+        strength_label = _strength_bucket(conf.strength)
+
+    return {
+        'direction': direction,
+        'bias': _bias_from_direction(direction),
+        'strength': round(conf.strength, 4),
+        'strength_label': strength_label,
+        'score': round(conf.score, 4),
+        'bullish_elements': [
+            {'name': e.name, 'detail': e.detail, 'strength': round(e.strength, 4)}
+            for e in conf.bullish_elements
+        ],
+        'bearish_elements': [
+            {'name': e.name, 'detail': e.detail, 'strength': round(e.strength, 4)}
+            for e in conf.bearish_elements
+        ],
+        'conflicts': list(conf.conflicts),
+        'primary_reason': conf.primary_reason,
+        'primary_blocker': conf.primary_blocker,
+        'secondary_blockers': list(conf.secondary_blockers),
+        'explanation': conf.explanation,
+        'evidence_count': conf.evidence_count,
+        'deduplicated_count': conf.deduplicated_count,
+    }
+
+
 def to_analyze_response(result: AnalysisResult) -> AnalyzeResponse:
     """Serialize a completed pipeline run into the public response shape."""
     signal = result.signal
@@ -486,6 +858,10 @@ def to_analyze_response(result: AnalysisResult) -> AnalyzeResponse:
         quality_detail=_score_detail(result.quality),
         confidence_detail=_score_detail(result.confidence),
         intelligence=_intelligence(result.intelligence),
+
+        ict_analysis=_build_ict_analysis(picture, confluence.enabled_modules),
+        msnr_analysis=_build_msnr_analysis(picture, confluence.enabled_modules),
+        ict_confluence=_build_ict_confluence_panel(picture, confluence.enabled_modules),
 
         diagnostic=_diagnostic(result),
 

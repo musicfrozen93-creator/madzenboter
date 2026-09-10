@@ -192,62 +192,73 @@ def build_diagnostic(
 def _build_gates(
     signal: TradingSignal, quality: Score, confidence: Score,
 ) -> List[GateResult]:
-    """Reconstruct which gates passed/failed from the signal state."""
+    """Reconstruct which gates passed/failed from the signal state.
+
+    Phase 3B: keys off the machine-readable ``decision_code`` on
+    ``TradingSignal`` instead of substring-matching ``wait_reason``.  This
+    makes the gate list robust when the decision message is reworded
+    (previously any tweak to the human sentence quietly broke the
+    diagnostic's "which gate failed" answer).
+    """
+    from analysis.decision import (
+        CODE_CONFIDENCE_BELOW,
+        CODE_CUSTOM_STRATEGY,
+        CODE_EXPERIMENTAL_STRATEGY,
+        CODE_HARD_CONFLICT,
+        CODE_MARKET_UNCLEAN,
+        CODE_MIN_RR,
+        CODE_NO_DIRECTION,
+        CODE_NO_STOP,
+        CODE_QUALITY_BELOW,
+        CODE_RISK_CEILING,
+        CODE_TARGETS,
+        CODE_TP1_RR,
+    )
     from analysis.scoring import MIN_TRADEABLE_CONFIDENCE, MIN_TRADEABLE_QUALITY
 
-    gates = []
-    is_wait = signal.direction == 'WAIT'
     reason = signal.wait_reason or ''
+    code = signal.decision_code or ''
 
-    gates.append(GateResult(
-        'market_conditions',
-        'market conditions unsuitable' not in reason,
-        'clean' if 'market conditions unsuitable' not in reason else reason,
-    ))
-    gates.append(GateResult(
-        'no_conflicts',
-        'conflicting signals' not in reason,
-        'no hard conflicts' if 'conflicting signals' not in reason else reason,
-    ))
-    gates.append(GateResult(
-        'direction_consensus',
-        'no directional consensus' not in reason,
-        'direction found' if 'no directional consensus' not in reason else reason,
-    ))
-    gates.append(GateResult(
-        'quality_floor',
-        quality.value >= MIN_TRADEABLE_QUALITY or 'setup quality' not in reason,
-        f'{quality.value}/100 ({quality.grade})',
-    ))
-    gates.append(GateResult(
-        'confidence_floor',
-        confidence.value >= MIN_TRADEABLE_CONFIDENCE or 'engine confidence' not in reason,
-        f'{confidence.value}/100 ({confidence.grade})',
-    ))
-    gates.append(GateResult(
-        'valid_stop',
-        'no valid stop' not in reason,
-        'stop placed' if 'no valid stop' not in reason else reason,
-    ))
-    gates.append(GateResult(
-        'risk_ceiling',
-        'risk ceiling' not in reason,
-        'within ceiling' if 'risk ceiling' not in reason else reason,
-    ))
-    gates.append(GateResult(
-        'sufficient_targets',
-        'not enough structural targets' not in reason,
-        'TP ladder built' if 'not enough structural targets' not in reason else reason,
-    ))
-    gates.append(GateResult(
-        'tp1_rr',
-        'TP1 reward:risk' not in reason,
-        'TP1 R:R adequate' if 'TP1 reward:risk' not in reason else reason,
-    ))
-    gates.append(GateResult(
-        'min_rr',
-        'best available reward:risk' not in reason,
-        'R:R clears minimum' if 'best available reward:risk' not in reason else reason,
-    ))
+    def _gate(name: str, matching_code: str, pass_detail: str) -> GateResult:
+        failed = code == matching_code
+        return GateResult(
+            name,
+            passed=not failed,
+            detail=reason if failed else pass_detail,
+        )
 
+    gates = [
+        # Gate 0 in the decision cascade: only a production strategy may emit a
+        # tradeable verdict. Listed first so a WAIT caused by it is explained
+        # rather than appearing as a signal that failed nothing.
+        GateResult(
+            'production_strategy',
+            passed=code not in (CODE_EXPERIMENTAL_STRATEGY, CODE_CUSTOM_STRATEGY),
+            detail=reason if code in (CODE_EXPERIMENTAL_STRATEGY, CODE_CUSTOM_STRATEGY)
+            else 'production strategy',
+        ),
+        _gate('market_conditions', CODE_MARKET_UNCLEAN, 'clean'),
+        _gate('no_conflicts', CODE_HARD_CONFLICT, 'no hard conflicts'),
+        _gate('direction_consensus', CODE_NO_DIRECTION, 'direction found'),
+        # Quality/confidence gates report the actual score in every branch so
+        # a passing gate still shows the reading — the FAIL branch supersedes
+        # that with the polished decision message.
+        GateResult(
+            'quality_floor',
+            passed=code != CODE_QUALITY_BELOW,
+            detail=reason if code == CODE_QUALITY_BELOW
+            else f'{quality.value}/100 ({quality.grade})',
+        ),
+        GateResult(
+            'confidence_floor',
+            passed=code != CODE_CONFIDENCE_BELOW,
+            detail=reason if code == CODE_CONFIDENCE_BELOW
+            else f'{confidence.value}/100 ({confidence.grade})',
+        ),
+        _gate('valid_stop', CODE_NO_STOP, 'stop placed'),
+        _gate('risk_ceiling', CODE_RISK_CEILING, 'within ceiling'),
+        _gate('sufficient_targets', CODE_TARGETS, 'TP ladder built'),
+        _gate('tp1_rr', CODE_TP1_RR, 'TP1 R:R adequate'),
+        _gate('min_rr', CODE_MIN_RR, 'R:R clears minimum'),
+    ]
     return gates

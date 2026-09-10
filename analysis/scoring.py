@@ -48,22 +48,30 @@ QUALITY_BANDS: tuple[tuple[int, str], ...] = (
     (0, 'Weak'),
 )
 
-# Absolute floor below which the evidence is too thin to act on at all.
+# Hard floor a setup must clear on BOTH scores before it can leave the
+# generator as a BUY/SELL.  A setup at 59/45 or 90/59 is WAIT, always — the
+# UI grade communicates the quality, but a "Weak"/"Low" reading is never a
+# trade recommendation.
 #
-# This is deliberately well below the 70 "Average" band. The grade COMMUNICATES
-# quality; it is not the trade gate. What forces WAIT is contradicting evidence —
-# an opposing higher timeframe, firmly opposing structure, or a market that is
-# less than 60% one-sided (see `analysis.confluence`). A 60/100 signal with no
-# conflicts is a real, honestly-graded "Weak" setup; suppressing it entirely
-# would hide information the user asked for rather than protect them.
-MIN_TRADEABLE_QUALITY = 50
+# Both floors are exposed as module constants for backward compatibility and
+# for tests that pin the contract.  The final decision layer
+# (`analysis.decision`) is the ONE place that reads them, so raising either
+# floor centrally raises every gate in the pipeline consistently.
+#
+# Phase 3B raised these from 50/35 to 60/60 after the audit found that
+# marginal readings were being surfaced as tradeable signals purely because
+# R:R happened to look acceptable.  See MIN_PROBABILITY_EDGE for the
+# companion fix that keeps a 51%/49% Elliott read from being counted as
+# directional evidence at all.
+MIN_TRADEABLE_QUALITY = 60
+MIN_TRADEABLE_CONFIDENCE = 60
 
-# Minimum confidence for the engine to emit a BUY/SELL signal. Below this the
-# engine is admitting it is too uncertain about its own reading, so the signal
-# is withheld as WAIT. Deliberately lower than the "Low" grading band (40) so
-# only the very bottom of the range is filtered — the user sees a "Low" badge
-# and can judge for themselves, but "Very Low" is suppressed.
-MIN_TRADEABLE_CONFIDENCE = 35
+# Minimum probability edge (percentage points) a probabilistic module must
+# clear before its top candidate is treated as directional evidence.  A 51/49
+# Elliott read has an edge of only 2 pp — well below the 10 pp default — so
+# it is reported as NEUTRAL with zero strength and zero confidence
+# contribution, exactly as the audit specified.
+MIN_PROBABILITY_EDGE = 10.0
 
 # Credit a module gets when it has no directional opinion. It is not evidence
 # for the trade, but it is not evidence against it either.

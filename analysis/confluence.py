@@ -18,11 +18,15 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from analysis.modules import (
+    ALL_MODULE_KEYS,
     BEARISH_VOTE,
     BULLISH_VOTE,
+    ICT_CONFLUENCE,
     MODULE_ORDER,
     ModuleVote,
     evaluate_modules,
+    ict_enabled,
+    msnr_enabled,
 )
 from typing import FrozenSet
 from analysis.structure import BEARISH, BULLISH, RANGE
@@ -56,7 +60,13 @@ class ConfluenceResult:
     # The modules that participated in this read. A user-disabled optional module
     # is absent here (and from `votes`), so the scorers exclude it from BOTH the
     # earned points and the maximum — never treating it as evidence against.
-    enabled_modules: FrozenSet[str] = field(default_factory=lambda: frozenset(MODULE_ORDER))
+    enabled_modules: FrozenSet[str] = field(default_factory=lambda: frozenset(ALL_MODULE_KEYS))
+    #: The strategy id the CALLER declared, if any. Carried so the decision
+    #: layer can honour an explicit 'CUSTOM' even when the module set happens
+    #: to coincide with a registered strategy. Never used to make a result
+    #: MORE permissive — only to keep a declared research run out of
+    #: production.
+    declared_strategy_id: Optional[str] = None
     # Phase 2A: ICT-MSNR contextual confluence. This is CONTEXTUAL evidence
     # from the relationship-based ICT-MSNR engine — it does NOT add weighted
     # votes to the module aggregation, it provides an independent directional
@@ -104,6 +114,7 @@ class ConfluenceEngine:
         self,
         mtf: MultiTimeframePicture,
         enabled_modules: Optional[FrozenSet[str]] = None,
+        declared_strategy_id: Optional[str] = None,
     ) -> ConfluenceResult:
         """Aggregate module votes for a multi-timeframe picture.
 
@@ -113,9 +124,11 @@ class ConfluenceEngine:
                 is excluded from the aggregation, the conflict checks, and the
                 score denominators — it is neutral/excluded, never negative.
         """
-        active = frozenset(MODULE_ORDER) if enabled_modules is None else enabled_modules
-        # Every module is still computed (pure and cheap), then filtered to the
-        # active set so disabled modules simply do not participate.
+        active = frozenset(ALL_MODULE_KEYS) if enabled_modules is None else enabled_modules
+        # Every weighted-vote module is still computed (pure and cheap), then
+        # filtered to the active set so disabled modules simply do not
+        # participate.  Contextual ICT/MSNR toggles are handled separately
+        # below — they never appear in `votes`.
         votes = [v for v in evaluate_modules(mtf) if v.module in active]
 
         bullish = sum(v.weighted_strength for v in votes if v.direction == BULLISH_VOTE)
@@ -127,6 +140,7 @@ class ConfluenceEngine:
                 direction=RANGE, votes=votes,
                 timeframe_agreement=mtf.alignment,
                 enabled_modules=active,
+                declared_strategy_id=declared_strategy_id,
                 reason='no module expressed a direction',
             )
 
@@ -140,6 +154,7 @@ class ConfluenceEngine:
                 bullish_weight=round(bullish, 2), bearish_weight=round(bearish, 2),
                 timeframe_agreement=mtf.alignment,
                 enabled_modules=active,
+                declared_strategy_id=declared_strategy_id,
                 reason='bullish and bearish evidence are exactly balanced',
             )
 
@@ -173,13 +188,38 @@ class ConfluenceEngine:
 
         # ── ICT-MSNR contextual confluence (Phase 2A) ──
         # Read the ICT-MSNR confluence from the entry picture. It is stored
-        # there by the Analysis Engine and consumed as CONTEXTUAL evidence.
+        # there by the Analysis Engine — which was given the same `active` set,
+        # so only the elements the user left on took part — and consumed here as
+        # CONTEXTUAL evidence.
+        #
+        # It is active when the ICT Confluence switch is on AND at least one
+        # substantive toggle feeds it. ICT_CONFLUENCE is itself an ICT key, so
+        # testing `ict_enabled` alone would be satisfied by the switch on its
+        # own — leaving the confluence "active" with nothing to read. Excluding
+        # the switch from that test, and counting MSNR toggles too, is what
+        # makes the condition mean what it says.
+        #
+        # With nothing to read, the context is neutral — treated exactly like a
+        # disabled weighted-vote module: no direction, no strength, no
+        # soft-conflict, never evidence against the setup.
+        feeds_confluence = (active - {ICT_CONFLUENCE})
+        ict_active = (
+            ICT_CONFLUENCE in active
+            and (ict_enabled(feeds_confluence) or msnr_enabled(feeds_confluence))
+        )
         ict_conf = mtf.entry.ict_confluence
-        ict_msnr_direction = getattr(ict_conf, 'direction', RANGE) or RANGE
-        ict_msnr_strength = getattr(ict_conf, 'strength', 0.0)
-        ict_msnr_score = getattr(ict_conf, 'score', 0.0)
-        ict_msnr_conflicts = getattr(ict_conf, 'conflicts', [])
-        ict_msnr_explanation = getattr(ict_conf, 'explanation', '')
+        if ict_active:
+            ict_msnr_direction = getattr(ict_conf, 'direction', RANGE) or RANGE
+            ict_msnr_strength = getattr(ict_conf, 'strength', 0.0)
+            ict_msnr_score = getattr(ict_conf, 'score', 0.0)
+            ict_msnr_conflicts = getattr(ict_conf, 'conflicts', [])
+            ict_msnr_explanation = getattr(ict_conf, 'explanation', '')
+        else:
+            ict_msnr_direction = RANGE
+            ict_msnr_strength = 0.0
+            ict_msnr_score = 0.0
+            ict_msnr_conflicts = []
+            ict_msnr_explanation = 'ICT confluence disabled'
 
         # If ICT-MSNR strongly opposes the module-vote direction, record it
         # as a soft conflict (not a hard one — ICT-MSNR is contextual, not a
@@ -204,6 +244,7 @@ class ConfluenceEngine:
             hard_conflicts=hard,
             timeframe_agreement=mtf.alignment,
             enabled_modules=active,
+            declared_strategy_id=declared_strategy_id,
             reason=(
                 f'{direction} by {agreement:.0%} of cast module weight '
                 f'({bullish:.1f} bullish vs {bearish:.1f} bearish)'

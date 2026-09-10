@@ -243,6 +243,7 @@ class AnalysisEngine:
         scope: Optional[RequestScope] = None,
         include_benchmark: bool = True,
         include_quote: bool = True,
+        enabled_modules=None,
     ) -> TechnicalPicture:
         """Fetch data and compute the full technical picture for one timeframe.
 
@@ -333,6 +334,9 @@ class AnalysisEngine:
         # we need it before constructing the picture.  Compute it here from the
         # same inputs as the property does (regime + EMA).
         pre_trend = _quick_trend_direction(regime, indicators)
+        # `enabled_modules` gates which ICT/MSNR elements take part. Passing it
+        # here is what makes the UI toggles real: without it the confluence
+        # would read all seven elements no matter what the user selected.
         ict_confluence = ict_conf_engine.evaluate(
             msnr=msnr,
             ict_structure=ict_structure,
@@ -342,6 +346,7 @@ class AnalysisEngine:
             fvg=fair_value_gaps,
             order_blocks=order_blocks,
             existing_trend=pre_trend,
+            active=enabled_modules,
         )
 
         spread = quote.spread if quote else 0.0

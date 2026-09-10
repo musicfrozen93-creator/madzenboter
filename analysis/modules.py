@@ -18,10 +18,16 @@ Pure and network-free.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import TYPE_CHECKING, Dict, List
 
-from analysis.engine import TechnicalPicture
 from analysis.structure import BEARISH, BULLISH, CHOCH, RANGE
+
+if TYPE_CHECKING:
+    # Type-only: `from __future__ import annotations` keeps every annotation a
+    # string at runtime, so importing this lazily costs nothing and lets the ICT
+    # confluence engine import the module-key constants defined below without a
+    # circular import (modules → engine → ict → ict_confluence → modules).
+    from analysis.engine import TechnicalPicture
 
 BULLISH_VOTE = 'bullish'
 BEARISH_VOTE = 'bearish'
@@ -246,6 +252,156 @@ def describe_modules() -> List[dict]:
     ]
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# STRATEGY PRESETS
+# ─────────────────────────────────────────────────────────────────────────────
+# A preset is a named, explicit set of OPTIONAL module keys. It is the single
+# source of truth for "what does ICT + MSNR mean" — the dashboard renders these
+# sets, it never invents its own.
+#
+# WHY THE SMART MONEY MODULES ARE PART OF THE ICT + MSNR PRESET
+# -------------------------------------------------------------
+# The ICT_* and MSNR_* keys are CONTEXTUAL toggles: weight zero, no vote, no
+# quality points. They decide which ICT/MSNR evidence is shown and whether the
+# confluence bonus applies. They cannot, on their own, score anything.
+#
+# The evidence they describe is produced by the weighted Smart Money modules:
+# ICTMSNRConfluenceEngine.evaluate() is handed the very same LiquidityState,
+# FairValueGapState and OrderBlockState objects that ORDER_BLOCK, FVG and
+# LIQUIDITY vote on, and MSNR's zones come from the same levels engine as
+# SUPPORT_RESISTANCE. There is exactly ONE underlying calculation per event; the
+# EvidenceRegistry in analysis.ict.evidence deduplicates by evidence_id so a
+# swing/level/gap seen by several layers is stored once.
+#
+# So enabling the ICT/MSNR toggles WITHOUT their weighted carriers would leave
+# the primary strategy with no scoring weight at all — the preset would be
+# cosmetic. ICT + MSNR therefore enables ORDER_BLOCK, FVG, LIQUIDITY and
+# SUPPORT_RESISTANCE as the canonical, deduplicated carriers of that evidence.
+
+#: Confirmation layer — context and participation, never the primary read.
+CONFIRMATION_MODULES: tuple[str, ...] = (VOLUME, ATR, VWAP)
+
+#: The weighted modules that carry ICT/MSNR evidence into the score. Enabling
+#: an ICT/MSNR toggle without these would produce evidence nothing can score.
+ICT_MSNR_CARRIERS: tuple[str, ...] = (
+    ORDER_BLOCK, FVG, LIQUIDITY, SUPPORT_RESISTANCE,
+)
+
+PRESET_ICT_MSNR = 'ict_msnr'
+PRESET_BALANCED = 'balanced'
+PRESET_CONSERVATIVE = 'conservative'
+PRESET_CUSTOM = 'custom'
+
+#: Yaksha AI's primary trading methodology, and the default for NEW analyses.
+_ICT_MSNR_KEYS: frozenset = frozenset(
+    ICT_MODULES + MSNR_MODULES + CONFIRMATION_MODULES + ICT_MSNR_CARRIERS
+)
+
+#: Classical technical analysis: structure, levels and momentum, no ICT/MSNR
+#: overlay. Excludes the probabilistic wave count and the two 1-point modules
+#: whose signal is too thin to change a decision.
+_CONSERVATIVE_KEYS: frozenset = frozenset(
+    (SUPPORT_RESISTANCE, FIBONACCI, RSI, ORDER_BLOCK, FVG, LIQUIDITY)
+    + CONFIRMATION_MODULES
+)
+
+#: Everything the engine offers — the historical default.
+_BALANCED_KEYS: frozenset = frozenset(OPTIONAL_UI_KEYS)
+
+PRESETS: Dict[str, frozenset] = {
+    PRESET_ICT_MSNR: _ICT_MSNR_KEYS,
+    PRESET_BALANCED: _BALANCED_KEYS,
+    PRESET_CONSERVATIVE: _CONSERVATIVE_KEYS,
+}
+
+PRESET_LABEL: Dict[str, str] = {
+    PRESET_ICT_MSNR: 'ICT + MSNR',
+    PRESET_BALANCED: 'Balanced',
+    PRESET_CONSERVATIVE: 'Conservative',
+}
+
+PRESET_DESCRIPTION: Dict[str, str] = {
+    PRESET_ICT_MSNR: (
+        'Smart-money structure and reaction levels, scored through their '
+        'deduplicated evidence carriers and confirmed by volume, volatility '
+        'and VWAP.'
+    ),
+    PRESET_BALANCED: 'Every module the engine offers.',
+    PRESET_CONSERVATIVE: (
+        'Classical structure, levels and momentum. No ICT or MSNR overlay, no '
+        'probabilistic wave count.'
+    ),
+}
+
+#: What a NEW analysis uses when the user has expressed no preference.
+DEFAULT_PRESET: str = PRESET_ICT_MSNR
+
+# Every preset must name only real optional keys.
+for _pid, _keys in PRESETS.items():
+    _unknown = _keys - OPTIONAL_UI_KEYS
+    assert not _unknown, f'preset {_pid} names unknown modules: {sorted(_unknown)}'
+
+# The ICT + MSNR preset must leave exactly the six modules the methodology
+# deliberately excludes switched off.
+assert (frozenset(MODULE_ORDER) - REQUIRED_MODULES) - _ICT_MSNR_KEYS == frozenset(
+    {ELLIOTT, FIBONACCI, RSI, MACD, ADX, PATTERN}
+), 'ICT + MSNR must disable exactly Elliott, Fibonacci, RSI, MACD, ADX and Patterns'
+
+
+class UnknownPresetError(ValueError):
+    """Raised when a caller names a preset the registry does not define."""
+
+
+def preset_modules(preset_id: str) -> frozenset:
+    """Full module set for a preset — required core plus its optional keys.
+
+    An unknown id RAISES. It used to fall back to the default preset, which is
+    the production methodology — so any unrecognised string (a typo, a stale
+    client, or the literal ``'custom'`` this API echoes back in its own
+    responses) silently resolved to a tradeable production configuration. A
+    name the registry does not define is an error, not a licence to trade.
+    """
+    keys = PRESETS.get(str(preset_id or '').strip().lower())
+    if keys is None:
+        raise UnknownPresetError(
+            f'Unknown preset {preset_id!r}. Choose one of: '
+            f'{", ".join(sorted(PRESETS))}.'
+        )
+    return frozenset(REQUIRED_MODULES | keys)
+
+
+def identify_preset(active) -> str:
+    """Name the preset an enabled-module set corresponds to.
+
+    Returns the preset id when the OPTIONAL portion matches one exactly,
+    otherwise ``'custom'``. Used by the serializer so a response states which
+    methodology produced it.
+    """
+    optional = frozenset(active) & OPTIONAL_UI_KEYS
+    for pid in (PRESET_ICT_MSNR, PRESET_CONSERVATIVE, PRESET_BALANCED):
+        if optional == PRESETS[pid]:
+            return pid
+    return PRESET_CUSTOM
+
+
+def describe_presets() -> List[dict]:
+    """Preset registry for the configuration UI.
+
+    Mirrors ``describe_modules``: the dashboard renders this and never hardcodes
+    a second definition of what a strategy preset contains.
+    """
+    return [
+        {
+            'id': pid,
+            'label': PRESET_LABEL[pid],
+            'description': PRESET_DESCRIPTION[pid],
+            'modules': sorted(PRESETS[pid]),
+            'default': pid == DEFAULT_PRESET,
+        }
+        for pid in (PRESET_ICT_MSNR, PRESET_BALANCED, PRESET_CONSERVATIVE)
+    ]
+
+
 def resolve_enabled_modules(requested) -> frozenset:
     """Resolve a user's requested module selection to the set actually used.
 
@@ -417,7 +573,20 @@ def _structure_vote(picture: TechnicalPicture) -> ModuleVote:
 
 
 def _elliott_vote(picture: TechnicalPicture) -> ModuleVote:
-    """Elliott wave count. Strength is the primary count's own confidence."""
+    """Elliott wave count.  Strength is the primary count's own confidence.
+
+    Phase 3B: probabilistic-uncertainty guard.  If the primary and the
+    alternative differ by less than ``MIN_PROBABILITY_EDGE`` percentage
+    points the read is effectively a coin flip (a 51/49 count is NOT
+    directional evidence), so the module votes NEUTRAL with zero strength
+    and its confidence component drops to zero.  The threshold is exposed
+    via ``analysis.scoring.MIN_PROBABILITY_EDGE`` and applies to every
+    probabilistic ranking, not just Elliott.
+    """
+    # Local import — the modules → scoring → modules cycle is broken by
+    # keeping this at call time instead of module load time.
+    from analysis.scoring import MIN_PROBABILITY_EDGE
+
     elliott = picture.elliott
     if not elliott.valid or elliott.primary is None:
         return ModuleVote(
@@ -425,6 +594,19 @@ def _elliott_vote(picture: TechnicalPicture) -> ModuleVote:
         )
 
     primary = elliott.primary
+    alt = elliott.alternative
+    if alt is not None:
+        edge = primary.confidence - alt.confidence
+        if edge < MIN_PROBABILITY_EDGE:
+            return ModuleVote(
+                ELLIOTT, NEUTRAL_VOTE, 0.0,
+                f'Uncertain ({primary.label} vs {alt.label})',
+                f'{primary.label} {primary.confidence:.0f}% vs '
+                f'{alt.label} {alt.confidence:.0f}% — edge of {edge:.0f} pp '
+                f'is below the {MIN_PROBABILITY_EDGE:.0f} pp uncertainty '
+                f'threshold, treated as neutral',
+            )
+
     strength = primary.confidence / 100.0
     if primary.rules_violated:
         # A count that breaks a hard rule still informs, but weakly.

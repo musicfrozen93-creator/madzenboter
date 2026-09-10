@@ -241,8 +241,15 @@ class MultiTimeframeEngine:
         symbol: str,
         timeframe: str,
         scope: Optional[RequestScope] = None,
+        enabled_modules=None,
     ) -> MultiTimeframePicture:
         """Analyse the ladder for a symbol.
+
+        Args:
+            enabled_modules: The module keys the user selected, forwarded to the
+                Analysis Engine so the ICT/MSNR confluence reads only the
+                elements they left switched on. ``None`` (the default) evaluates
+                everything, preserving the original behaviour.
 
         Raises:
             ValueError / ProviderError: Only when the ENTRY rung fails. Higher
@@ -266,6 +273,7 @@ class MultiTimeframeEngine:
                     include_benchmark=(role == TREND or (is_entry and not views)),
                     # The live quote only matters where the trade is taken.
                     include_quote=is_entry,
+                    enabled_modules=enabled_modules,
                 )
             except (ValueError, ProviderError) as exc:
                 if is_entry:

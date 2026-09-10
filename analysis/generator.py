@@ -26,6 +26,17 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from analysis.confluence import ConfluenceResult
+from analysis.decision import (
+    CODE_MIN_RR,
+    CODE_NO_STOP,
+    CODE_RISK_CEILING,
+    CODE_TARGETS,
+    CODE_TP1_RR,
+    FinalDecision,
+    approve,
+    decide,
+    reject,
+)
 from analysis.engine import TechnicalPicture
 from analysis.scoring import MIN_TRADEABLE_CONFIDENCE, MIN_TRADEABLE_QUALITY, Score
 from analysis.structure import BULLISH
@@ -54,7 +65,13 @@ MIN_TP1_RR = 0.5
 
 @dataclass
 class TradingSignal:
-    """One complete signal, ready to be serialized to the dashboard."""
+    """One complete signal, ready to be serialized to the dashboard.
+
+    Carries the FinalDecision produced by the central decision layer so
+    every downstream consumer (API, serializer, UI) reads the same
+    authoritative verdict and never has to re-derive tradeability from
+    quality/confidence on its own.
+    """
 
     market: str
     provider: str
@@ -71,6 +88,13 @@ class TradingSignal:
     entry_basis: Optional[str] = None
     stop_basis: Optional[str] = None
     wait_reason: Optional[str] = None
+    # ── Phase 3B: authoritative decision, filled by every code path ──
+    # `direction_bias` remembers which side the analysis leaned toward for a
+    # WAIT so the UI can label the bias without pretending it is tradeable.
+    tradeable: bool = False
+    direction_bias: Optional[str] = None     # 'long' | 'short' | None
+    decision_code: str = ''                  # machine-readable, see decision.py
+    decision_message: str = ''               # human-readable, ready for the UI
 
     @property
     def actionable(self) -> bool:
@@ -98,7 +122,20 @@ class SignalGenerator:
         confidence: Score,
         price_precision: int = 8,
     ) -> TradingSignal:
-        """Produce the signal, or a WAIT carrying the reason it was withheld."""
+        """Produce the signal, routing every gate through the FinalDecision layer.
+
+        The pre-risk gates (market conditions, hard conflicts, direction
+        consensus, quality floor, confidence floor) are owned by
+        ``analysis.decision`` — the ONE place in the codebase that says
+        "tradeable?".  Risk gates (stop / risk ceiling / TP ladder / R:R)
+        live here because they need the concrete price levels, but they
+        still emit ``FinalDecision`` objects via ``reject()`` so downstream
+        consumers see one uniform shape.
+
+        R:R is deliberately checked AFTER the quality/confidence floors —
+        a great R:R can never elevate a weak, low-confidence setup into a
+        tradeable signal.
+        """
         entry_picture = mtf.entry
         base = dict(
             market=mtf.market,
@@ -107,86 +144,81 @@ class SignalGenerator:
             timeframe=mtf.selected_timeframe,
         )
 
-        def wait(reason: str) -> TradingSignal:
-            return TradingSignal(direction=WAIT, wait_reason=reason, **base)
+        pre_risk = decide(
+            market_blocking=entry_picture.blocking_condition,
+            confluence=confluence,
+            quality=quality,
+            confidence=confidence,
+        )
+        if not pre_risk.tradeable:
+            return self._wait_signal(pre_risk, base)
 
-        # 1. Unclean conditions: a reading taken off a news candle or a blown-out
-        #    spread is not trustworthy, whatever the modules say.
-        blocking = entry_picture.blocking_condition
-        if blocking:
-            return wait(f'market conditions unsuitable — {blocking}')
-
-        # 2. Two-sided or contradicted evidence.
-        if confluence.hard_conflicts:
-            return wait('conflicting signals — ' + '; '.join(confluence.hard_conflicts))
-        if not confluence.has_direction:
-            return wait(confluence.reason or 'no directional consensus')
-
-        side = confluence.trade_side
+        side = pre_risk.direction_bias
         assert side is not None
 
-        # 3. Quality floor. Signal quality matters more than signal quantity.
-        if quality.value < MIN_TRADEABLE_QUALITY:
-            return wait(
-                f'setup quality {quality.value}/100 ({quality.grade}) is below the '
-                f'tradeable floor of {MIN_TRADEABLE_QUALITY}'
-            )
-
-        # 4. Confidence floor. The engine must be reasonably certain about its own
-        #    reading before it emits a tradeable signal.
-        if confidence.value < MIN_TRADEABLE_CONFIDENCE:
-            return wait(
-                f'engine confidence {confidence.value}/100 ({confidence.grade}) is '
-                f'below the tradeable floor of {MIN_TRADEABLE_CONFIDENCE}'
-            )
-
-        # 5. Levels, all derived from the analysis.
+        # ── Risk gates ──
         entry, entry_basis = self._entry(entry_picture, side, price_precision)
         stop, stop_basis = self._stop(entry_picture, side, entry, price_precision)
         if stop is None:
-            return wait(f'no valid stop level — {stop_basis}')
+            return self._wait_signal(
+                reject(side, CODE_NO_STOP, f'No valid stop level — {stop_basis}.'),
+                base,
+            )
 
         risk = abs(entry - stop)
         risk_pct = risk / entry if entry > 0 else 0.0
         if risk_pct > self.params.stop_ceiling_pct:
-            return wait(
-                f'invalidation sits {risk_pct:.2%} away, beyond the '
-                f'{self.params.stop_ceiling_pct:.0%} risk ceiling'
+            return self._wait_signal(
+                reject(
+                    side, CODE_RISK_CEILING,
+                    f'Invalidation sits {risk_pct:.2%} away, beyond the '
+                    f'{self.params.stop_ceiling_pct:.0%} risk ceiling.',
+                ),
+                base,
             )
 
         targets = self._targets(entry_picture, side, entry, risk, price_precision)
         if len(targets) < 3:
-            return wait(
-                'not enough structural targets above the entry to build a '
-                'TP1/TP2/TP3 ladder'
+            return self._wait_signal(
+                reject(
+                    side, CODE_TARGETS,
+                    'Not enough structural targets to build a TP1/TP2/TP3 ladder.',
+                ),
+                base,
             )
 
-        # Per-target reward:risk for transparent evaluation.
         rr_per_tp = [
             round(abs(t.price - entry) / risk, 2) if risk > 0 else 0.0
             for t in targets
         ]
 
-        # TP1 must offer a meaningful near-term reward, not just 0.5R.
         if rr_per_tp[0] < self.params.min_tp1_rr:
-            return wait(
-                f'TP1 reward:risk is {rr_per_tp[0]:.2f}, below the '
-                f'{self.params.min_tp1_rr:.2f} minimum'
+            return self._wait_signal(
+                reject(
+                    side, CODE_TP1_RR,
+                    f'TP1 reward:risk is {rr_per_tp[0]:.2f}, below the '
+                    f'{self.params.min_tp1_rr:.2f} minimum.',
+                ),
+                base,
             )
 
-        # The furthest target must clear the overall minimum reward:risk.
         minimum = take_profit_levels(entry, stop, side, self.params)['min_rr_price']
         clears = (
             targets[-1].price >= minimum if side == 'long' else targets[-1].price <= minimum
         )
         if not clears:
-            return wait(
-                f'best available reward:risk is {rr_per_tp[-1]:.2f}, below the '
-                f'{self.params.min_rr:.2f} minimum'
+            return self._wait_signal(
+                reject(
+                    side, CODE_MIN_RR,
+                    f'Best available reward:risk is {rr_per_tp[-1]:.2f}, below the '
+                    f'{self.params.min_rr:.2f} minimum.',
+                ),
+                base,
             )
 
+        approved = approve(side)
         return TradingSignal(
-            direction=BUY if side == 'long' else SELL,
+            direction=approved.signal,
             entry=entry,
             stop_loss=stop,
             take_profits=[t.price for t in targets],
@@ -196,6 +228,28 @@ class SignalGenerator:
             target_sources=[t.source for t in targets],
             entry_basis=entry_basis,
             stop_basis=stop_basis,
+            tradeable=True,
+            direction_bias=side,
+            decision_code=approved.reason_code,
+            decision_message=approved.reason_message,
+            **base,
+        )
+
+    def _wait_signal(self, decision: FinalDecision, base: dict) -> TradingSignal:
+        """Wrap a FinalDecision-rejected outcome in a TradingSignal.
+
+        ``wait_reason`` keeps the old free-text field for existing consumers
+        (diagnostic gates, backward-compatible clients).  ``decision_*``
+        carries the machine-readable code + polished message that the API
+        and the UI use for the banner.
+        """
+        return TradingSignal(
+            direction=WAIT,
+            wait_reason=decision.reason_message,
+            tradeable=False,
+            direction_bias=decision.direction_bias,
+            decision_code=decision.reason_code,
+            decision_message=decision.reason_message,
             **base,
         )
 

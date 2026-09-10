@@ -91,6 +91,7 @@ class SignalPipeline:
         timeframe: str,
         candle_limit: Optional[int] = None,
         enabled_modules=None,
+        declared_strategy_id: Optional[str] = None,
     ) -> AnalysisResult:
         """Analyse one symbol on one timeframe and return the full result.
 
@@ -106,8 +107,14 @@ class SignalPipeline:
         started = time.perf_counter()
         scope = RequestScope()
 
-        mtf = self.mtf_engine.build(provider, symbol, timeframe, scope=scope)
-        confluence = self.confluence_engine.evaluate(mtf, enabled_modules=enabled_modules)
+        mtf = self.mtf_engine.build(
+            provider, symbol, timeframe, scope=scope,
+            enabled_modules=enabled_modules,
+        )
+        confluence = self.confluence_engine.evaluate(
+            mtf, enabled_modules=enabled_modules,
+            declared_strategy_id=declared_strategy_id,
+        )
 
         precision = self._price_precision(provider, symbol, scope)
         quality = self.quality_scorer.score(mtf, confluence)

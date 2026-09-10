@@ -57,6 +57,17 @@ from analysis.ict.premium_discount import (
 from analysis.smc.fvg import FairValueGapState
 from analysis.smc.liquidity import LiquidityState
 from analysis.smc.order_blocks import OrderBlockState
+from analysis.modules import (
+    ICT_BOS,
+    ICT_DISPLACEMENT,
+    ICT_FVG,
+    ICT_LIQUIDITY,
+    ICT_LIQUIDITY_SWEEPS,
+    ICT_MSS,
+    ICT_ORDER_BLOCKS,
+    ICT_PREMIUM_DISCOUNT,
+    MSNR_LOCATION,
+)
 from analysis.structure import BEARISH, BULLISH, RANGE
 
 logger = logging.getLogger(__name__)
@@ -68,6 +79,34 @@ MIN_ALIGNED_ELEMENTS = 3
 # Deliberately small — exposed separately for the confluence engine to
 # interpret as relationship context, not as added weight.
 MAX_ICT_CONTRIBUTION = 8
+
+# Which UI toggle owns each confluence element and each pattern component.
+#
+# A toggle the user switched OFF removes its element from the read AND its
+# share from the pattern denominator — the same "disabled is excluded, never
+# penalised" contract the weighted modules use (see analysis.scoring). Without
+# this the toggles would be decorative: the confluence would evaluate all seven
+# elements no matter what the user selected.
+#
+# Note these gate the RELATIONSHIP read only. The underlying gap/block/pool is
+# scored exactly once, by its weighted carrier module (FVG, ORDER_BLOCK,
+# LIQUIDITY, SUPPORT_RESISTANCE); nothing here adds a second scoring path.
+ELEMENT_TOGGLE: dict = {
+    'MSNR Location': (MSNR_LOCATION,),
+    'ICT Structure': (ICT_MSS, ICT_BOS),
+    'Displacement': (ICT_DISPLACEMENT,),
+    'Premium/Discount': (ICT_PREMIUM_DISCOUNT,),
+    'Liquidity': (ICT_LIQUIDITY, ICT_LIQUIDITY_SWEEPS),
+    'FVG': (ICT_FVG,),
+    'Order Block': (ICT_ORDER_BLOCKS,),
+}
+
+
+def _on(active, *keys) -> bool:
+    """True when the layer is unrestricted, or any of its toggles is enabled."""
+    if active is None:
+        return True
+    return any(k in active for k in keys)
 
 
 @dataclass(frozen=True)
@@ -134,6 +173,7 @@ class ICTMSNRConfluenceEngine:
         fvg: FairValueGapState,
         order_blocks: OrderBlockState,
         existing_trend: str = RANGE,
+        active=None,
     ) -> IctMsnrConfluence:
         """Evaluate ICT-MSNR confluence from all the component results.
 
@@ -146,6 +186,10 @@ class ICTMSNRConfluenceEngine:
             fvg: Fair value gaps from the existing engine.
             order_blocks: Order blocks from the existing engine.
             existing_trend: The trend direction from the existing analysis.
+            active: The enabled module keys. ``None`` (the default) evaluates
+                every element, preserving the original behaviour for callers
+                that do not configure modules. Otherwise each element and each
+                pattern component is included only when its toggle is on.
 
         Returns:
             IctMsnrConfluence with the relationship-based directional read.
@@ -164,26 +208,21 @@ class ICTMSNRConfluenceEngine:
         elements: List[ConfluenceElement] = []
         conflicts: List[str] = []
 
-        # ── MSNR Location ──
-        elements.append(self._eval_msnr(msnr))
-
-        # ── ICT Structure (BOS / MSS) ──
-        elements.append(self._eval_ict_structure(ict_structure))
-
-        # ── Displacement ──
-        elements.append(self._eval_displacement(displacement))
-
-        # ── Premium/Discount ──
-        elements.append(self._eval_premium_discount(premium_discount))
-
-        # ── Liquidity (from existing engine) ──
-        elements.append(self._eval_liquidity(liquidity))
-
-        # ── FVG (from existing engine) ──
-        elements.append(self._eval_fvg(fvg))
-
-        # ── Order Blocks (from existing engine) ──
-        elements.append(self._eval_order_blocks(order_blocks))
+        # Each element is included only when the user left its toggle on. The
+        # Liquidity/FVG/Order Block readings are the SAME objects the weighted
+        # carrier modules vote on — reused, never recomputed, so one market
+        # event produces one score.
+        for element in (
+            self._eval_msnr(msnr),
+            self._eval_ict_structure(ict_structure),
+            self._eval_displacement(displacement),
+            self._eval_premium_discount(premium_discount),
+            self._eval_liquidity(liquidity),
+            self._eval_fvg(fvg),
+            self._eval_order_blocks(order_blocks),
+        ):
+            if _on(active, *ELEMENT_TOGGLE.get(element.name, ())):
+                elements.append(element)
 
         # 3. Classify elements by direction.
         bullish = [e for e in elements if e.direction == BULLISH]
@@ -194,6 +233,7 @@ class ICTMSNRConfluenceEngine:
         direction, strength, reason, blockers = self._determine_direction(
             bullish, bearish, neutral, existing_trend, msnr, ict_structure,
             displacement, liquidity, fvg, order_blocks, premium_discount,
+            active,
         )
 
         # 5. Check for conflicts with the existing trend.
@@ -339,6 +379,7 @@ class ICTMSNRConfluenceEngine:
         fvg: FairValueGapState,
         order_blocks: OrderBlockState,
         premium_discount: PremiumDiscountResult,
+        active=None,
     ) -> tuple[str, float, str, List[str]]:
         """Determine direction from the RELATIONSHIP between elements.
 
@@ -366,13 +407,13 @@ class ICTMSNRConfluenceEngine:
         # Check for the high-quality long pattern.
         long_quality = self._check_long_pattern(
             msnr, ict_structure, displacement, liquidity, fvg, order_blocks,
-            premium_discount, existing_trend,
+            premium_discount, existing_trend, active,
         )
 
         # Check for the high-quality short pattern.
         short_quality = self._check_short_pattern(
             msnr, ict_structure, displacement, liquidity, fvg, order_blocks,
-            premium_discount, existing_trend,
+            premium_discount, existing_trend, active,
         )
 
         # Neither pattern is strong enough.
@@ -437,6 +478,7 @@ class ICTMSNRConfluenceEngine:
         order_blocks: OrderBlockState,
         premium_discount: PremiumDiscountResult,
         existing_trend: str,
+        active=None,
     ) -> float:
         """Evaluate the quality of a bullish ICT-MSNR pattern (0–1).
 
@@ -447,46 +489,60 @@ class ICTMSNRConfluenceEngine:
           + Bullish displacement
           + Bullish FVG or Order Block
           + Existing trend/context not strongly bearish
+
+        A component whose toggle the user switched off leaves BOTH ``score`` and
+        ``max_score`` — excluded from the pattern, never counted against it. The
+        remaining components are renormalised, mirroring how the Quality Score
+        treats a disabled module.
         """
         score = 0.0
         max_score = 0.0
 
         # 1. MSNR support (most important for location context).
-        max_score += 0.25
-        if msnr.location == SUPPORT_ZONE:
-            score += 0.25 * msnr.strength
+        if _on(active, MSNR_LOCATION):
+            max_score += 0.25
+            if msnr.location == SUPPORT_ZONE:
+                score += 0.25 * msnr.strength
 
         # 2. Sell-side liquidity sweep (contrarian bullish).
-        max_score += 0.20
-        if (liquidity.last_sweep is not None
-                and liquidity.direction == BULLISH):
-            score += 0.20 * liquidity.score
+        if _on(active, ICT_LIQUIDITY, ICT_LIQUIDITY_SWEEPS):
+            max_score += 0.20
+            if (liquidity.last_sweep is not None
+                    and liquidity.direction == BULLISH):
+                score += 0.20 * liquidity.score
 
         # 3. Bullish MSS or BOS.
-        max_score += 0.20
-        if ict_structure.has_mss and ict_structure.mss_direction == BULLISH:
-            score += 0.20 * ict_structure.strength
-        elif ict_structure.has_bos and ict_structure.bos_direction == BULLISH:
-            score += 0.15 * ict_structure.strength  # BOS slightly less significant
+        if _on(active, ICT_MSS, ICT_BOS):
+            max_score += 0.20
+            if ict_structure.has_mss and ict_structure.mss_direction == BULLISH:
+                score += 0.20 * ict_structure.strength
+            elif ict_structure.has_bos and ict_structure.bos_direction == BULLISH:
+                score += 0.15 * ict_structure.strength  # BOS slightly less significant
 
         # 4. Bullish displacement.
-        max_score += 0.15
-        if displacement.direction == DISP_BULLISH:
-            score += 0.15 * displacement.strength
+        if _on(active, ICT_DISPLACEMENT):
+            max_score += 0.15
+            if displacement.direction == DISP_BULLISH:
+                score += 0.15 * displacement.strength
 
         # 5. Bullish FVG or Order Block.
-        max_score += 0.10
-        if fvg.direction == BULLISH:
-            score += 0.05 * fvg.score
-        if order_blocks.direction == BULLISH:
-            score += 0.05 * order_blocks.score
+        if _on(active, ICT_FVG):
+            max_score += 0.05
+            if fvg.direction == BULLISH:
+                score += 0.05 * fvg.score
+        if _on(active, ICT_ORDER_BLOCKS):
+            max_score += 0.05
+            if order_blocks.direction == BULLISH:
+                score += 0.05 * order_blocks.score
 
         # 6. Discount zone adds context.
-        max_score += 0.05
-        if premium_discount.zone == DISCOUNT:
-            score += 0.05
+        if _on(active, ICT_PREMIUM_DISCOUNT):
+            max_score += 0.05
+            if premium_discount.zone == DISCOUNT:
+                score += 0.05
 
-        # 7. Existing trend penalty.
+        # 7. Existing trend penalty. Trend is a required core module, so this
+        #    component is always present.
         max_score += 0.05
         if existing_trend == BULLISH:
             score += 0.05  # trend alignment bonus
@@ -505,6 +561,7 @@ class ICTMSNRConfluenceEngine:
         order_blocks: OrderBlockState,
         premium_discount: PremiumDiscountResult,
         existing_trend: str,
+        active=None,
     ) -> float:
         """Evaluate the quality of a bearish ICT-MSNR pattern (0–1).
 
@@ -515,46 +572,57 @@ class ICTMSNRConfluenceEngine:
           + Bearish displacement
           + Bearish FVG or Order Block
           + Existing trend/context not strongly bullish
+
+        Mirrors :meth:`_check_long_pattern`: a component whose toggle is off
+        leaves both the score and the denominator.
         """
         score = 0.0
         max_score = 0.0
 
         # 1. MSNR resistance.
-        max_score += 0.25
-        if msnr.location == RESISTANCE_ZONE:
-            score += 0.25 * msnr.strength
+        if _on(active, MSNR_LOCATION):
+            max_score += 0.25
+            if msnr.location == RESISTANCE_ZONE:
+                score += 0.25 * msnr.strength
 
         # 2. Buy-side liquidity sweep (contrarian bearish).
-        max_score += 0.20
-        if (liquidity.last_sweep is not None
-                and liquidity.direction == BEARISH):
-            score += 0.20 * liquidity.score
+        if _on(active, ICT_LIQUIDITY, ICT_LIQUIDITY_SWEEPS):
+            max_score += 0.20
+            if (liquidity.last_sweep is not None
+                    and liquidity.direction == BEARISH):
+                score += 0.20 * liquidity.score
 
         # 3. Bearish MSS or BOS.
-        max_score += 0.20
-        if ict_structure.has_mss and ict_structure.mss_direction == BEARISH:
-            score += 0.20 * ict_structure.strength
-        elif ict_structure.has_bos and ict_structure.bos_direction == BEARISH:
-            score += 0.15 * ict_structure.strength
+        if _on(active, ICT_MSS, ICT_BOS):
+            max_score += 0.20
+            if ict_structure.has_mss and ict_structure.mss_direction == BEARISH:
+                score += 0.20 * ict_structure.strength
+            elif ict_structure.has_bos and ict_structure.bos_direction == BEARISH:
+                score += 0.15 * ict_structure.strength
 
         # 4. Bearish displacement.
-        max_score += 0.15
-        if displacement.direction == DISP_BEARISH:
-            score += 0.15 * displacement.strength
+        if _on(active, ICT_DISPLACEMENT):
+            max_score += 0.15
+            if displacement.direction == DISP_BEARISH:
+                score += 0.15 * displacement.strength
 
         # 5. Bearish FVG or Order Block.
-        max_score += 0.10
-        if fvg.direction == BEARISH:
-            score += 0.05 * fvg.score
-        if order_blocks.direction == BEARISH:
-            score += 0.05 * order_blocks.score
+        if _on(active, ICT_FVG):
+            max_score += 0.05
+            if fvg.direction == BEARISH:
+                score += 0.05 * fvg.score
+        if _on(active, ICT_ORDER_BLOCKS):
+            max_score += 0.05
+            if order_blocks.direction == BEARISH:
+                score += 0.05 * order_blocks.score
 
         # 6. Premium zone adds context.
-        max_score += 0.05
-        if premium_discount.zone == PREMIUM:
-            score += 0.05
+        if _on(active, ICT_PREMIUM_DISCOUNT):
+            max_score += 0.05
+            if premium_discount.zone == PREMIUM:
+                score += 0.05
 
-        # 7. Existing trend penalty.
+        # 7. Existing trend penalty. Trend is required core, always present.
         max_score += 0.05
         if existing_trend == BEARISH:
             score += 0.05

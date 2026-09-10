@@ -1,5 +1,48 @@
 # Deployment & the "analysis service unreachable" (503) fix
 
+> ## Security boundary — read before deploying
+>
+> **Next.js is the public API boundary. This FastAPI service is an internal
+> analysis engine.** Authentication, subscription checks, rate limits and market
+> entitlements are enforced in the Next.js route handlers — this service knows
+> nothing about users.
+>
+> Because the website runs on Vercel (serverless, external to the VPS), the
+> engine **must** be reachable from the public internet: a Vercel function
+> cannot reach a Docker service name or a loopback address. A private-network
+> deployment is therefore not available while the frontend is serverless.
+>
+> That makes a service credential mandatory. Every route under `/api/` requires
+> `ANALYSIS_API_KEY`, presented by Next.js as `X-Service-Key` (or
+> `Authorization: Bearer`). Without it the engine — and every control the
+> Next.js layer performs — would be one `curl` away for anyone who knows the
+> hostname.
+>
+> **REQUIRED on both sides, same value:**
+>
+> ```bash
+> openssl rand -hex 32          # generate once
+> ```
+>
+> | Where | Variable |
+> |---|---|
+> | VPS `.env` (docker compose) | `ANALYSIS_API_KEY=<value>` |
+> | Vercel environment | `ANALYSIS_API_KEY=<same value>` |
+>
+> The engine **fails closed**: unset or shorter than 16 characters and every
+> analysis request is rejected with `503`. A missing key must never silently
+> reopen anonymous access. `/health` stays open for the container healthcheck.
+>
+> **CORS is not authentication.** `ALLOWED_ORIGINS` is a browser-enforced
+> policy; curl, Postman and every server-side client ignore it. It can neither
+> grant nor deny access. Do not set it to `*` — the service drops a wildcard and
+> logs a critical warning.
+>
+> Also note: `docker-compose.yml` publishes PostgreSQL on host port 5432. On a
+> VPS without a firewall rule that exposes the database to the internet. Nothing
+> outside the compose file needs it — prefer `127.0.0.1:5432:5432`, or remove
+> the block. Verify what depends on it before changing.
+
 The website (Vercel) reaches the analysis engine like this:
 
 ```
@@ -37,6 +80,10 @@ Vercel ──▶ https://api.zentryai.site ──▶ reverse proxy ──▶ htt
 ```
 
 Then set on **Vercel**: `ANALYSIS_API_URL=https://api.zentryai.site`
+and `ANALYSIS_API_KEY=<the value from the VPS .env>`.
+
+The subdomain is public, so the credential is what protects it. Anyone can reach
+`https://api.zentryai.site`; only a caller holding the key gets an analysis.
 
 ---
 

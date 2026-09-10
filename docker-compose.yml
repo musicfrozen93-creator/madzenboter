@@ -21,6 +21,39 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-zengrid_dev_password}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # ── PUBLIC BY NECESSITY — do not remove without changing the architecture ──
+    #
+    # This publishes PostgreSQL on the host, i.e. on the internet unless a
+    # firewall says otherwise. That is REQUIRED by the current topology, not an
+    # oversight:
+    #
+    #   * the website runs on Vercel, and every API route queries this database
+    #     directly through lib/db.js — Vercel's serverless runtime is external
+    #     to this VPS and cannot use the internal Docker network;
+    #   * `npm run build` on Vercel runs lib/db/migrate-on-build.js against the
+    #     real database, so the deploy itself needs to reach it.
+    #
+    # Its Vercel-side DATABASE_URL points at YOUR_VPS_HOST:5432
+    # (see the website's example.env.example).
+    #
+    # The analysis service in THIS compose file does NOT need the host port —
+    # it reaches postgres over the internal Docker network by service name.
+    # So the host publish exists solely for Vercel.
+    #
+    # BECAUSE IT MUST STAY PUBLIC, protect it explicitly:
+    #   1. Firewall 5432 to Vercel's egress addresses if your plan provides
+    #      static IPs; otherwise at minimum rate-limit and monitor it.
+    #   2. Require TLS on the server (postgresql.conf `ssl = on`,
+    #      pg_hba.conf `hostssl ... scram-sha-256`) and set DB_SSL=true on
+    #      Vercel. NOTE: lib/db.js currently sets rejectUnauthorized:false, so
+    #      the connection is encrypted but NOT authenticated against a CA —
+    #      it resists passive sniffing, not an active MITM.
+    #   3. Use a long random POSTGRES_PASSWORD; it is the only thing standing
+    #      between the internet and the data.
+    #
+    # If the website ever moves off serverless (a container on this VPS, or
+    # Vercel with a private tunnel), delete this block and let it use the
+    # internal network — that is the only way to make 5432 private.
     ports:
       - "5432:5432"
     healthcheck:
@@ -46,7 +79,15 @@ services:
       # No exchange API key exists anywhere in this stack — the analysis
       # service uses public market data only and never places an order.
       - DATABASE_URL=postgresql://zengrid:${POSTGRES_PASSWORD:-zengrid_dev_password}@postgres:5432/zengrid
+      # CORS origins. NOT a security control — it constrains browsers only and
+      # is ignored by curl and every server-side client. Authorization is
+      # ANALYSIS_API_KEY below.
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-http://localhost:3000}
+      # REQUIRED. Shared credential the Next.js server presents on every call.
+      # Without it this service rejects every analysis request with 503.
+      # Set the SAME value on the Next.js deployment (Vercel env var of the
+      # same name). Generate with: openssl rand -hex 32
+      - ANALYSIS_API_KEY=${ANALYSIS_API_KEY:?ANALYSIS_API_KEY must be set — the analysis engine is publicly reachable and refuses anonymous requests}
       - API_HOST=0.0.0.0
       - API_PORT=8000
       - API_WORKERS=${API_WORKERS:-2}

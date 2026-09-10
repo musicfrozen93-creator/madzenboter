@@ -51,10 +51,35 @@ class AnalyzeRequest(BaseModel):
         default=None,
         description=(
             'Optional list of analysis module keys to include (e.g. ["rsi","macd"]). '
-            'Omit to use every module. Required core modules are always included; '
-            'unknown names are ignored.'
+            'Supplying one is CUSTOM mode: the list is honoured exactly, and a '
+            'configuration nobody has validated is analysed in full but never '
+            'tradeable. Omit it (and strategy_id and preset) to get the '
+            'production default strategy. Required core modules are always '
+            'included; unknown names are ignored.'
         ),
         examples=[['rsi', 'macd', 'ema', 'market_structure']],
+    )
+    strategy_id: Optional[str] = Field(
+        default=None,
+        description=(
+            "The analysis strategy to run, e.g. 'ICT_MSNR_V1' (see "
+            'GET /api/indicators for the catalogue). The backend resolves the '
+            'id against its own registry — a client names a strategy, it never '
+            'describes one — so a known id takes precedence over any module '
+            "list sent alongside it. Use 'CUSTOM' (or omit this) together with "
+            'enabled_indicators to configure modules by hand. An unknown id '
+            'falls back to the default strategy rather than failing.'
+        ),
+        examples=['ICT_MSNR_V1'],
+    )
+    preset: Optional[str] = Field(
+        default=None,
+        description=(
+            "Legacy preset id (e.g. 'ict_msnr'). Superseded by strategy_id and "
+            'kept for backward compatibility; strategy_id wins when both are '
+            'sent. Ignored when enabled_indicators is supplied in custom mode.'
+        ),
+        examples=['ict_msnr'],
     )
 
 
@@ -572,6 +597,84 @@ class AnalyzeResponse(BaseModel):
         default_factory=list,
         description='Analysis module keys that participated in this result.',
     )
+    strategy_id: str = Field(
+        default='CUSTOM',
+        description=(
+            "The strategy that produced this analysis, e.g. 'ICT_MSNR_V1', or "
+            "'CUSTOM' when the module selection matches no registered strategy. "
+            'Persist this with a saved analysis: it records which definition '
+            'produced the result, so a later strategy revision never silently '
+            'reinterprets it.'
+        ),
+    )
+    strategy_name: str = Field(
+        default='Custom',
+        description="Display name, e.g. 'ICT + MSNR'.",
+    )
+    strategy_version: int = Field(
+        default=1,
+        description='Version of the strategy definition that ran.',
+    )
+    strategy_status: str = Field(
+        default='custom',
+        description=(
+            "'production', 'experimental' or 'custom'. An experimental strategy "
+            'is analysed in full but can never be tradeable: the decision layer '
+            "returns WAIT with decision_reason 'experimental_strategy'. Persist "
+            'this with a saved analysis so a research result stays labelled as '
+            'one.'
+        ),
+    )
+    enabled_modules: List[str] = Field(
+        default_factory=list,
+        description=(
+            'The modules this analysis ran — the same list as '
+            'enabled_indicators, under the name the strategy registry uses.'
+        ),
+    )
+    preset: str = Field(
+        default='custom',
+        description=(
+            'Legacy preset name for the enabled module set. Superseded by '
+            'strategy_id; kept so existing clients keep working.'
+        ),
+    )
+
+    # ── Phase 3B: authoritative final-decision fields ──
+    # Downstream clients (UI banner, alert generators, backtests) MUST read
+    # `tradeable` — never re-derive it from quality/confidence themselves.
+    tradeable: bool = Field(
+        default=False,
+        description=(
+            'True only when the engine emitted BUY/SELL and every gate passed. '
+            'Always false when signal=WAIT. A signal with tradeable=false must '
+            'never be rendered as a green BUY/SELL banner in the UI.'
+        ),
+    )
+    direction_bias: Optional[str] = Field(
+        default=None,
+        description=(
+            "Which side the analysis leaned toward — 'long' | 'short' | null. "
+            'Populated even on WAIT so the UI can label the bias without '
+            'implying a tradeable recommendation.'
+        ),
+    )
+    decision_reason: str = Field(
+        default='',
+        description=(
+            "Machine-readable code for the final decision. 'tradeable' when "
+            'the signal is BUY/SELL; one of confidence_below_threshold, '
+            'quality_below_threshold, hard_conflict, tp1_rr_below_minimum, '
+            'etc. when the signal is WAIT.'
+        ),
+    )
+    decision_message: str = Field(
+        default='',
+        description=(
+            'Human-readable, UI-ready sentence explaining the final decision. '
+            'For a WAIT this is the primary rejection reason.'
+        ),
+    )
 
     entry: Optional[float] = Field(default=None, description='Null when WAIT.')
     sl: Optional[float] = Field(default=None, description='Null when WAIT.')
@@ -694,10 +797,77 @@ class IndicatorModel(BaseModel):
     required: bool
 
 
+class PresetModel(BaseModel):
+    """One named strategy preset."""
+
+    id: str = Field(description="Preset id, e.g. 'ict_msnr'.")
+    label: str = Field(description="Display name, e.g. 'ICT + MSNR'.")
+    description: str
+    modules: List[str] = Field(
+        description='The OPTIONAL module keys this preset enables. Required '
+                    'core modules are always on and are not listed here.',
+    )
+    default: bool = Field(
+        default=False,
+        description='True for the preset a NEW analysis should start from.',
+    )
+
+
+class StrategyModel(BaseModel):
+    """One named analysis strategy from the canonical registry."""
+
+    strategy_id: str = Field(description="Stable, versioned id, e.g. 'ICT_MSNR_V1'.")
+    name: str = Field(description="Display name, e.g. 'ICT + MSNR'.")
+    description: str = Field(description='What the strategy analyses.')
+    category: str = Field(description="e.g. 'smart_money', 'trend', 'momentum'.")
+    enabled_modules: List[str] = Field(
+        description='OPTIONAL module keys this strategy switches on.',
+    )
+    locked_modules: List[str] = Field(
+        description='Core modules that always run and cannot be switched off.',
+    )
+    confirmation_modules: List[str] = Field(
+        description='Which of the enabled modules act as confirmation.',
+    )
+    recommended: bool = Field(default=False)
+    version: int = Field(default=1)
+    status: str = Field(
+        default='experimental',
+        description=(
+            "Validation status: 'production' (designed and audited, may produce "
+            "tradeable signals), 'experimental' (research and preview only — the "
+            "engine forces WAIT), or 'custom' (the user's own selection). No "
+            'status asserts backtested performance.'
+        ),
+    )
+
+
 class IndicatorsResponse(BaseModel):
     """GET /api/indicators — the analysis modules the engine supports."""
 
     indicators: List[IndicatorModel]
+    strategies: List[StrategyModel] = Field(
+        default_factory=list,
+        description=(
+            'The canonical strategy catalogue. Clients render this rather than '
+            'defining strategies of their own, so a strategy added here appears '
+            'in the UI with no frontend change.'
+        ),
+    )
+    default_strategy: str = Field(
+        default='',
+        description='Strategy id a new analysis should start from.',
+    )
+    presets: List[PresetModel] = Field(
+        default_factory=list,
+        description='Named strategy presets. The single source of truth for '
+                    'what each methodology contains — clients render these '
+                    'rather than defining their own.',
+    )
+    default_preset: str = Field(
+        default='',
+        description='Preset id a new analysis should start from.',
+    )
 
 
 class HealthResponse(BaseModel):

@@ -8,14 +8,17 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from analysis.modules import describe_modules
+from analysis.modules import DEFAULT_PRESET, describe_modules, describe_presets
+from analysis.strategies import DEFAULT_STRATEGY_ID, describe_strategies
 from api.dependencies import get_settings
 from api.schemas import (
     ErrorResponse,
     IndicatorModel,
     IndicatorsResponse,
     MarketsResponse,
+    PresetModel,
     ProviderModel,
+    StrategyModel,
     SymbolsResponse,
 )
 from config.settings import Settings
@@ -58,7 +61,11 @@ def list_indicators() -> IndicatorsResponse:
     be disabled; the rest are user-configurable.
     """
     return IndicatorsResponse(
-        indicators=[IndicatorModel(**m) for m in describe_modules()]
+        indicators=[IndicatorModel(**m) for m in describe_modules()],
+        presets=[PresetModel(**p) for p in describe_presets()],
+        default_preset=DEFAULT_PRESET,
+        strategies=[StrategyModel(**s) for s in describe_strategies()],
+        default_strategy=DEFAULT_STRATEGY_ID,
     )
 
 

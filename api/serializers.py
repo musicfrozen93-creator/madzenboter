@@ -15,16 +15,20 @@ from typing import Optional
 from analysis.diagnostic import build_diagnostic
 from analysis.elliott import ElliottState, WaveCount
 from analysis.levels import SupportResistance, Zone
+from analysis.strategies import identify_strategy
 from analysis.modules import (
     ICT_BOS,
     ICT_CONFLUENCE,
     ICT_DISPLACEMENT,
+    ict_enabled,
     ICT_FVG,
     ICT_LIQUIDITY,
     ICT_LIQUIDITY_SWEEPS,
     ICT_MSS,
     ICT_ORDER_BLOCKS,
     ICT_PREMIUM_DISCOUNT,
+    identify_preset,
+    msnr_enabled,
     MSNR_KEY_SR,
     MSNR_LOCATION,
     MSNR_PDHL,
@@ -32,8 +36,6 @@ from analysis.modules import (
     MSNR_RESISTANCE_ZONES,
     MSNR_SUPPORT_ZONES,
     MSNR_SWING_LEVELS,
-    ict_enabled,
-    msnr_enabled,
 )
 from analysis.pipeline import AnalysisResult
 from analysis.scoring import Score
@@ -714,6 +716,14 @@ def to_analyze_response(result: AnalysisResult) -> AnalyzeResponse:
     quote = picture.quote
     confluence = result.confluence
 
+    # Which registered strategy does this module set correspond to? Resolved
+    # from the canonical registry, so the response names the definition that
+    # actually ran rather than echoing whatever the client claimed.
+    _strategy = identify_strategy(
+        confluence.enabled_modules,
+        getattr(confluence, 'declared_strategy_id', None),
+    )
+
     # Pair each module vote with the points it contributed to the Quality Score.
     quality_points = {c.name: c for c in result.quality.components}
     breakdown = [
@@ -738,11 +748,22 @@ def to_analyze_response(result: AnalysisResult) -> AnalyzeResponse:
         symbol=signal.symbol,
         timeframe=signal.timeframe,
 
+        tradeable=signal.tradeable,
+        direction_bias=signal.direction_bias,
+        decision_reason=signal.decision_code,
+        decision_message=signal.decision_message,
+
         quality=result.quality.value,
         quality_grade=result.quality.grade,
         confidence=result.confidence.value,
         confidence_grade=result.confidence.grade,
         enabled_indicators=sorted(confluence.enabled_modules),
+        enabled_modules=sorted(confluence.enabled_modules),
+        strategy_id=_strategy.strategy_id,
+        strategy_name=_strategy.name,
+        strategy_version=_strategy.version,
+        strategy_status=_strategy.status,
+        preset=identify_preset(confluence.enabled_modules),
 
         entry=signal.entry,
         sl=signal.stop_loss,

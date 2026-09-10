@@ -17,6 +17,7 @@ from providers.registry import (
     register,
     reset_for_tests,
 )
+from tests.conftest import TEST_SERVICE_KEY
 from tests.fakes import StubProvider, make_candles, make_downtrend, make_uptrend
 
 TEST_MARKET = 'apitest'
@@ -39,7 +40,7 @@ def client(settings):
     register(ApiStubProvider)
     app = create_app()
     app.dependency_overrides[get_settings] = lambda: settings
-    with TestClient(app) as test_client:
+    with TestClient(app, headers={'X-Service-Key': TEST_SERVICE_KEY}) as test_client:
         yield test_client
     app.dependency_overrides.clear()
     _REGISTRY.pop(ApiStubProvider.name, None)
@@ -128,7 +129,9 @@ def test_no_placeholder_values_remain(client):
 
 
 def test_analyze_includes_the_full_module_breakdown(client):
-    analysis = _analyze(client).json()['analysis']
+    # Every module, requested explicitly: an unconfigured request now runs the
+    # production strategy (ICT + MSNR), not the whole registry.
+    analysis = _analyze(client, preset='balanced').json()['analysis']
     breakdown = {row['module']: row for row in analysis['breakdown']}
 
     assert set(breakdown) == set(MODULE_ORDER)
@@ -189,7 +192,9 @@ def test_smc_blocks_have_directions_and_scores(client):
 
 def test_breakdown_now_lists_fifteen_modules(client):
     from analysis.modules import MODULE_ORDER
-    breakdown = _analyze(client).json()['analysis']['breakdown']
+    # Every module, requested explicitly: an unconfigured request now runs the
+    # production strategy (ICT + MSNR), not the whole registry.
+    breakdown = _analyze(client, preset='balanced').json()['analysis']['breakdown']
     assert len(breakdown) == 15
     assert {row['module'] for row in breakdown} == set(MODULE_ORDER)
 
@@ -276,7 +281,9 @@ def test_intelligence_does_not_alter_the_signal(client):
 
 
 def test_score_breakdowns_are_returned(client):
-    body = _analyze(client).json()
+    # Every module, requested explicitly: an unconfigured request now runs the
+    # production strategy (ICT + MSNR), not the whole registry.
+    body = _analyze(client, preset='balanced').json()
     assert body['quality_detail']['value'] == body['quality']
     assert body['confidence_detail']['value'] == body['confidence']
     assert len(body['quality_detail']['components']) == len(MODULE_ORDER)

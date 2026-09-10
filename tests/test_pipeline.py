@@ -11,6 +11,7 @@ from analysis.confluence import MIN_AGREEMENT, ConfluenceEngine
 from analysis.engine import AnalysisEngine
 from analysis.generator import BUY, SELL, WAIT
 from analysis.modules import MODULE_ORDER
+from analysis.strategies import DEFAULT_STRATEGY_ID, strategy_modules
 from analysis.pipeline import SignalPipeline
 from analysis.scoring import MIN_TRADEABLE_QUALITY
 from providers.base import UnknownSymbolError, UnsupportedTimeframeError
@@ -183,9 +184,15 @@ def test_targets_come_from_named_analysis_sources(pipeline):
 # ─────────────────────────────────────────────
 
 def test_unclean_conditions_force_wait(pipeline):
-    signal = pipeline.run(StubProvider(spread=500.0), 'BTCUSDT', '15m').signal
+    # Runs the PRODUCTION strategy: this test is about the market-conditions
+    # gate, and gate 0 blocks any non-production configuration before it.
+    signal = pipeline.run(
+        StubProvider(spread=500.0), 'BTCUSDT', '15m',
+        enabled_modules=strategy_modules(DEFAULT_STRATEGY_ID),
+    ).signal
     assert signal.direction == WAIT
-    assert 'market conditions unsuitable' in signal.wait_reason
+    # Decision layer polishes the sentence casing; match case-insensitively.
+    assert 'market conditions unsuitable' in signal.wait_reason.lower()
 
 
 def test_conflicting_timeframes_prefer_wait(pipeline):

@@ -34,3 +34,22 @@ def clean_candle_cache():
     CANDLE_CACHE.clear()
     yield
     CANDLE_CACHE.clear()
+
+# ── Service authentication ──────────────────────────────────────────────────
+# The analysis API rejects unauthenticated requests (api/security.py). Tests
+# configure a key process-wide and the API fixtures present it; the direct
+# security tests override it deliberately to prove the rejection paths.
+TEST_SERVICE_KEY = 'test-service-key-0123456789abcdef'
+
+
+@pytest.fixture(autouse=True)
+def service_key(monkeypatch):
+    """Configure the shared secret for the duration of each test."""
+    monkeypatch.setenv('ANALYSIS_API_KEY', TEST_SERVICE_KEY)
+    yield TEST_SERVICE_KEY
+
+
+@pytest.fixture
+def auth_headers():
+    """Headers a trusted caller service presents."""
+    return {'X-Service-Key': TEST_SERVICE_KEY}

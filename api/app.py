@@ -36,7 +36,7 @@ from fastapi import Depends, FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from api.routes import analyze, health, markets
+from api.routes import analyze, bulk, health, markets
 from api.security import API_KEY_ENV, is_configured, require_service_auth
 from api.routes.health import SERVICE_VERSION
 from providers.base import ProviderError
@@ -182,6 +182,7 @@ def create_app() -> FastAPI:
     # requires the service credential.
     protected = [Depends(require_service_auth)]
     app.include_router(analyze.router, prefix=API_PREFIX, dependencies=protected)
+    app.include_router(bulk.router, prefix=API_PREFIX, dependencies=protected)
     app.include_router(markets.router, prefix=API_PREFIX, dependencies=protected)
 
     return app

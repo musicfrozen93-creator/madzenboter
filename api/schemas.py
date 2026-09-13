@@ -889,3 +889,154 @@ class ErrorResponse(BaseModel):
 
     error: str
     detail: Optional[str] = None
+
+
+# ─────────────────────────────────────────────
+# Bulk analysis
+# ─────────────────────────────────────────────
+# Additive only. Nothing below changes the meaning of a field above, and the
+# single-analysis contract (AnalyzeRequest / AnalyzeResponse) is untouched.
+#
+# One request analyses a SMALL batch and returns when that batch is done. A
+# fifty-coin scan is many such requests, driven by the caller — which is what
+# lets the feature work against a serverless frontend with no queue, no worker
+# and no job state in this service.
+
+class BulkAnalyzeRequest(BaseModel):
+    """POST /api/analyze/bulk body — several symbols, one timeframe, one strategy.
+
+    Note what is ABSENT: there is no `enabled_indicators` and no `preset`. A
+    bulk caller can never hand-pick modules — it names a production strategy and
+    the backend decides what that means. Module-level configuration belongs on
+    the single-analysis route, where one result is produced and the user can see
+    what they configured.
+
+    Every field is validated in the route rather than by the schema alone, so a
+    rejected batch comes back as a 400 with a sentence the caller can act on
+    instead of a generic schema error.
+    """
+
+    market: str = Field(
+        default='crypto',
+        description="Market class. Bulk analysis is not offered for 'forex'.",
+        examples=['crypto'],
+    )
+    symbols: List[str] = Field(
+        default_factory=list,
+        # An OUTER PARSE BOUND, not the product ceiling. Without it the route's
+        # normalize-and-de-duplicate loop walks the entire submitted list before
+        # the ceiling check can reject it, so a body of 100,000 strings would be
+        # fully parsed and fully normalized on its way to a 400 — free work for
+        # a caller sending garbage. This refuses an absurd list at the schema,
+        # before a single symbol is touched.
+        #
+        # It is set well ABOVE MAX_BULK_SYMBOLS_PER_REQUEST (10) on purpose. The
+        # real ceiling is enforced in the route AFTER de-duplication, because a
+        # caller that sends the same pair eleven times sent two symbols, not
+        # eleven, and deserves the 200 — and a caller that genuinely sent too
+        # many deserves the route's actionable 400 naming the limit, not a
+        # generic 422 schema error. Only lists no honest client could send are
+        # refused here.
+        max_length=100,
+        description=(
+            'Platform symbols to analyse. Normalized and de-duplicated '
+            'server-side, and the response preserves that order. A MALFORMED '
+            'symbol fails the whole request; a well-formed but unlisted one '
+            'becomes a failed RESULT, so it cannot cost the caller the rest of '
+            'the batch. At most 100 entries are parsed at all; the real ceiling '
+            'is applied after de-duplication and is much lower.'
+        ),
+        examples=[['BTCUSDT', 'ETHUSDT', 'SOLUSDT']],
+    )
+    timeframe: str = Field(
+        default='',
+        description=(
+            'The single timeframe every symbol is analysed on, restricted to '
+            f'the tradeable set. One of: {", ".join(TIMEFRAMES)}.'
+        ),
+        examples=['15m'],
+    )
+    strategy_id: str = Field(
+        default='',
+        description=(
+            'REQUIRED. The production strategy to run, e.g. ICT_MSNR_V1. Bulk '
+            'analysis has no default strategy and accepts production strategies '
+            'only: an experimental or custom configuration is forced to WAIT by '
+            'the decision layer, so a fifty-symbol batch of one would spend the '
+            'venue budget producing non-answers. The empty default exists only '
+            'so an omitted id is rejected by the route with an actionable 400 — '
+            'it is never treated as a value and never resolves to a strategy.'
+        ),
+        examples=['ICT_MSNR_V1'],
+    )
+    provider: Optional[str] = Field(
+        default=None,
+        description='Optional explicit provider name. Omit to use the market default.',
+        examples=['binance'],
+    )
+
+
+class BulkResultModel(BaseModel):
+    """One symbol's outcome inside a bulk response.
+
+    `analysis` is the COMPLETE, UNMODIFIED single-analysis payload. Embedding
+    the whole thing is deliberate: it makes it structurally impossible for the
+    bulk path and the single path to report different numbers for the same
+    setup, because there is only ever one set of numbers.
+    """
+
+    symbol: str = Field(description='The normalized platform symbol.')
+    status: str = Field(
+        description="'completed' when an analysis was produced, otherwise 'failed'.",
+        examples=['completed'],
+    )
+    reason: Optional[str] = Field(
+        default=None,
+        description=(
+            'Why this symbol failed — set only when status is "failed", and '
+            'always one of a fixed set of safe phrases. Never an exception '
+            'message: those can carry venue URLs or internal paths, and they '
+            'tell the user nothing.'
+        ),
+        examples=['Market data unavailable'],
+    )
+    analysis: Optional[AnalyzeResponse] = Field(
+        default=None,
+        description=(
+            'The full POST /api/analyze response for this symbol — exactly what '
+            'the single route would have returned. Null when the symbol failed.'
+        ),
+    )
+
+
+class BulkAnalyzeResponse(BaseModel):
+    """POST /api/analyze/bulk response.
+
+    A failed symbol is a RESULT, not an error: the request succeeds as long as
+    the batch ran at all, and per-symbol outcomes are reported individually.
+    """
+
+    market: str
+    timeframe: str = Field(description='The timeframe every symbol was analysed on.')
+    strategy_id: str = Field(description='The strategy that ran, e.g. ICT_MSNR_V1.')
+    strategy_status: str = Field(
+        description="Always 'production' — bulk runs production strategies only.",
+    )
+    provider: str
+
+    requested: int = Field(description='Symbols analysed, after de-duplication.')
+    completed: int = Field(description='Symbols that produced an analysis.')
+    failed: int = Field(description='Symbols that did not.')
+
+    concurrency: int = Field(
+        description='Analyses that were allowed to run at once, after clamping.',
+    )
+    elapsed_ms: int = Field(description='Wall time for the whole batch.')
+
+    results: List[BulkResultModel] = Field(
+        default_factory=list,
+        description=(
+            'One entry per requested symbol, in the same order as the '
+            'de-duplicated request.'
+        ),
+    )
